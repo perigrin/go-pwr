@@ -73,7 +73,7 @@ Indices are 0-based. Values are decimal (see **Sources and confidence**) and may
 | 22 | Amp-hours, "three days before" | Ah | 4 | from code |
 | 23 | Amp-hours, "seven days before" | Ah | 93 | from code |
 
-The app's History screen would settle indices 20–23: it shows 15/16/4/93 if they are decimal, 21/22/4/147 if hex.
+The app screens can't settle whether indices 19–23 are decimal or hex, because each app shows its own interpretation. Logging `raw` until amp-hours today passes 9 will (see **Sources and confidence**). What period each of indices 20–23 covers is a separate open question.
 
 Indices 1, 3, 4, 6, 7, 13, 15, 18 and 24–31 are discarded or unused by the app, and their meaning is unknown. Index 3 (14475) looks like another millivolt value, perhaps a charge target, but that's a guess.
 
@@ -130,4 +130,4 @@ A project online (`bigthrilla/camper-ble-bridge`) polls this controller by writi
 - Then comes a long run in which `0x50` recurs every 16 bytes, followed by zeros. Reading these as history records is an interpretation the dump can't confirm.
 - Two captures a minute apart were byte-for-byte identical, so the dump does not track live readings. Some values in it are near live ones (`59 A3` = 22,947 mV is close to the PV voltage), but they don't change between captures and may be history such as a daily maximum.
 
-That project's parser reads one of those 16-byte records, and it takes "battery percent" from the record's `0x50` marker byte, so it always reports 80%. Use the status request above for live data.
+That project's parser reads one of those 16-byte runs, and it takes "battery percent" from the `0x50` byte that starts it, so it always reports 80%. Use the status request above for live data.

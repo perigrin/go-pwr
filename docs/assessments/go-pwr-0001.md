@@ -1433,3 +1433,12 @@ These are the findings and notes whose recorded disposition sends work to the im
 - **P7-1:** setting the bounds from hardware and field-format limits, never narrowed to captured ranges, each with its reason.
 
 P3's round-4 to round-6 notes are carried along with the P3 rows, as P3 stated in each round: the D-Bus sequence boundary, `CLOCK_BOOTTIME`, `hci0` and the non-numeric code corner.
+
+## Owner's decisions during refinement
+
+After acceptance, refinement surfaced four points the decision left open. perigrin decided them. Two of them amend the decision text, and both are marked there as his decisions made during refinement:
+
+1. **Missing `--mac`** with `--format json`, `--poll` or `--follow`: error on stderr and exit status 1, before any Bluetooth call (not a usage error, exit 2). *Amends: Finding the controller.*
+2. **Fatal at startup:** BlueZ not running, and the adapter powered off or blocked, are added to "no adapter" and "access denied". A supervisor restart covers each once it clears. After startup, adapter loss is still retried. *Amends: Behavior and errors.*
+3. **Hardware tests on lola** run as test binaries cross-compiled on the Mac (`GOOS=linux GOARCH=arm GOARM=6 go test -c`) and copied over. No Go toolchain on lola. *Implementation; recorded in the issues.*
+4. **Go version:** Go 1.27.3, installed with gvm and made the default. `go.mod` carries `toolchain go1.27.3`, so any shell picks it up through GOTOOLCHAIN=auto. *Implementation; recorded in the foundation issue.*

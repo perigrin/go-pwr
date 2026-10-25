@@ -4,9 +4,7 @@
 
 ## Short Links to Important Resources
 
-- [Plans](docs/plans) — implementation plans and roadmap documents
 - [Decisions](docs/decisions) — architecture decision records (ADRs)
+- [Assessments](docs/assessments) — the record of each decision's review
 - [Contributing guides](docs/contributing) — coding conventions and development workflow
-- [Guides](docs/guides) — how-to guides for common tasks
-- [Architecture](docs/architecture) — system design and component descriptions
-- [Reference](docs/reference) — reference documentation
+- [Reference](docs/reference) — reference documentation, including the controller protocol

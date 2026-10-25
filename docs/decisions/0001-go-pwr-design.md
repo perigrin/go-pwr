@@ -1,3 +1,7 @@
+---
+state: accepted
+---
+
 # go-pwr design
 
 `go-pwr` reads live status from a Go Power! **GP-PWM-30-SB** solar charge controller (catalog name GP-SB-PWM-30-BT) over Bluetooth LE and prints it, either for a person or as JSON for other tools. It is the first of a set of small Unix-style tools for **lola**, a Raspberry Pi Zero W in a travel trailer. Other tools consume its output: a shell script that shuts lola down safely on low battery, and a web dashboard. Those tools are out of scope here, but this decision states what they may rely on.

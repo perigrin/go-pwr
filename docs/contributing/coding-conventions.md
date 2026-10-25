@@ -1,6 +1,6 @@
 ---
 stability: 1
-covers: []
+covers: ["docs/reference/protocol.md"]
 ---
 
 ## Code Style

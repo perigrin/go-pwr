@@ -1,6 +1,6 @@
 ---
 stability: 1
-covers: []
+covers: ["docs/decisions/0001-go-pwr-design.md"]
 ---
 
 ## Setup

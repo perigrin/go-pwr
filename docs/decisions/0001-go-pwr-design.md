@@ -84,7 +84,7 @@ lola has no real-time clock, so its wall clock can step at boot or when it syncs
 
 The controller appears to accept **one connection at a time**. `go-pwr` doesn't arbitrate between consumers. So:
 
-- On lola, **one `go-pwr` process owns the controller.** The intended setup is a single `go-pwr --poll --format json --mac …` with **only its stdout** going to a log, which the shutdown script and the dashboard both read. stderr goes elsewhere, such as the system journal.
+- On lola, **one `go-pwr` process owns the controller.** The intended setup is a single `go-pwr --poll --format json --mac …` with **only its stdout** going to a log, which the shutdown script and the dashboard both read. stderr goes elsewhere, such as the system journal. **The shutdown script's feed must use `--poll`, never `--follow`.** Each `--poll` reading gets a fresh connection, so a late tail from an earlier reply can't be spliced into it. While the °C/°F check only warns, nothing else stops a splice in `--follow` mode.
 - `--poll` leaves the controller free for the phone app between readings. `--follow` locks the phone app, and any other consumer, out for as long as it runs.
 - Hardware tests on lola need the owner process stopped while they run.
 
@@ -151,7 +151,7 @@ Only codes 0 (charge state) and 3 (battery type) have been observed. The rest fo
 
 - Go, with Bluetooth through `tinygo.org/x/bluetooth`, which talks to BlueZ over D-Bus without cgo. Where the library can't keep a promise above (notification order, disconnecting after an abandoned connect), the code may call BlueZ's D-Bus API directly.
 - The command lives under `cmd/`. The decoding and formatting are packages other programs can import.
-- Turning notifications into a reply, a reply into a reading, and a reading into output is pure logic with no Bluetooth. The Bluetooth layer hands that logic the notifications in the order the controller sent them.
+- Turning notifications into a reply, a reply into a reading, and a reading into output is pure logic with no Bluetooth. The Bluetooth layer hands that logic the notifications in the order the controller sent them. **That in-order delivery is the only guard against reordered notifications.** Nothing in the reply's content catches a reorder: most chunk swaps still pass the whole-reply rule, and at least one reports a healthy battery as 0.00 V. The implementing issue must prove the ordering with a reorder unit test and a soak test on lola.
 - On a non-Linux OS, the whole module still builds, and its non-hardware tests run. There, the Bluetooth layer returns an "unsupported platform" error.
 
 ## Testing

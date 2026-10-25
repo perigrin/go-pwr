@@ -1449,3 +1449,5 @@ After acceptance, refinement surfaced four points the decision left open. perigr
 6. **Fakes are acceptable for the ordering test:** hand-built D-Bus signals may stand in for BlueZ when testing that notifications are delivered in order (chain review PB-18). This is a narrow exception to the no-mocks rule, for that test. *Recorded in the issue.*
 7. **The due date stays 2026-11-08**, although about 14 issues queue on lola's single connection and two need real-world conditions (a low-battery night, a busy-RF site).
 8. **Architecture overview:** perigrin asked during refinement for `docs/architecture/overview.md`, written as the milestone's last issue, after the code.
+9. **Low battery means 12.2 V** for the night capture, with "no PV" meaning PV voltage below battery voltage and zero charge current (chain review PB-12, AL-6).
+10. **Race testing runs on the Mac:** `go test -race` covers the platform-neutral code (the scan guard, the read buffer, reply assembly) on darwin/arm64. `-race` isn't supported on lola's linux/arm, so the lola soak test covers the hardware side without it (chain review AL-10, P3-4).

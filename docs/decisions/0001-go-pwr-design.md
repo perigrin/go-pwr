@@ -18,7 +18,7 @@
 
 ## The protocol
 
-The full protocol, its sources and how confident we are in each field are in [protocol.md](protocol.md). In short:
+The full protocol, its sources and how confident we are in each field are in [protocol.md](../reference/protocol.md). In short:
 
 - Connect without pairing. The controller appears to allow one connection at a time.
 - Enable notifications on `FFF1`, write a single space to `FFF2` (service `FFF0`), and concatenate the notifications.

@@ -1,10 +1,10 @@
 # go-pwr design
 
-`go-pwr` reads live status from a Go Power! **GP-PWM-30-SB** solar charge controller (catalog name GP-SB-PWM-30-BT) over Bluetooth LE and prints it, either for a person or as JSON for other tools. It is the first of a set of small Unix-style tools for **lola**, a Raspberry Pi Zero W in a travel trailer. Other tools (a shell script that shuts lola down safely on low battery, a web dashboard) consume its output. Those are out of scope here.
+`go-pwr` reads live status from a Go Power! **GP-PWM-30-SB** solar charge controller (catalog name GP-SB-PWM-30-BT) over Bluetooth LE and prints it, either for a person or as JSON for other tools. It is the first of a set of small Unix-style tools for **lola**, a Raspberry Pi Zero W in a travel trailer. Other tools consume its output: a shell script that shuts lola down safely on low battery, and a web dashboard. Those tools are out of scope here, but this decision states what they may rely on.
 
 ## Goals
 
-- Read the controller's live status: battery voltage, solar (PV) voltage, charge current, charge state, state of charge, temperature, amp-hour history.
+- Read the controller's live status: battery voltage, solar (PV) voltage, charge current, charge state, battery type, temperature, amp-hour history.
 - Print one reading, or a continuous stream of readings, as human-readable text or JSON lines.
 - Never change the controller's state.
 - Be usable as a Go library later, without restructuring.
@@ -13,18 +13,19 @@
 
 - Changing controller settings, or sending any command other than the status request.
 - The safe-shutdown script, the web dashboard, systemd units, packaging.
+- Arbitrating access between several consumers (see **Sharing the controller**).
 - Other devices (Victron shunt, Lippert OneControl, Starlink, Coleman thermostat).
 - Decoding every field of the reply. Undecoded fields are kept in `raw`.
 
 ## The protocol
 
-The full protocol, its sources and how confident we are in each field are in [protocol.md](../reference/protocol.md). In short:
+The protocol, its sources, and how much evidence stands behind each field are in [the protocol reference](../reference/protocol.md). In short:
 
-- Connect without pairing. The controller appears to allow one connection at a time.
-- Enable notifications on `FFF1`, write a single space to `FFF2` (service `FFF0`), and concatenate the notifications.
-- The reply is ASCII decimal fields separated by `;`, complete at 30–32 fields. `go-pwr` decodes indices 0 (charge mA), 2 (battery mV), 9 (battery type), 10 (state of charge %), 11 (PV mV), 12 (charge state), 16/17 (°C/°F) and 19–23 (amp-hour history).
-- Charge state code 0 is reported as `bulk`, which is what the app shows. See **Code names** below for every code's JSON string and text label.
-- **`go-pwr` has no code path that sends anything other than the status request.** The app's reset, force-charge and settings commands are never sent.
+- Connect, enable notifications on `FFF1`, write a single space to `FFF2` (service `FFF0`), and assemble the notifications into one reply.
+- The reply is ASCII decimal fields separated by `;`. `go-pwr` decodes indices 0 (charge mA), 2 (battery mV), 9 (battery type), 11 (PV mV), 12 (charge state), 16/17 (°C/°F) and 19–23 (amp-hour history).
+- Index 10 is **not** decoded. It was guessed to be state of charge, but it read 100 while the battery was bulk-charging at 13.24 V, and there is no evidence for that meaning.
+- Every decoded field has been observed in a single reply from one controller. The reference says so field by field.
+- **`go-pwr` writes exactly one thing to `FFF2`: the single byte `0x20`.** Apart from the standard descriptor write that turns on `FFF1` notifications, it writes nothing else to the controller. The app's reset, force-charge, unlock and settings commands are never sent.
 
 ## Command-line interface
 
@@ -34,38 +35,41 @@ go-pwr [--mac ADDR] [--format text|json] [--timeout DUR] [--poll[=DUR] | --follo
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--mac` | none: match by the advertised name `GP-PWM-30-SB` | Controller address. Set it to avoid picking up a neighbor's controller. |
+| `--mac` | none | Controller address. **Required** with `--format json`, `--poll` or `--follow`. |
 | `--format` | `text` | `text` for people, `json` for one JSON object per line |
-| `--timeout` | `20s` | One budget per reading, covering scan, connect (when one is needed) and the reply |
-| `--poll[=DUR]` | off; bare flag means `30s` | Read every DUR, connecting and disconnecting each time, which leaves the controller free for the phone app in between |
-| `--follow[=DUR]` | off; bare flag means `5s` | Hold one connection and read every DUR. The phone app is locked out while this runs. |
+| `--timeout` | `20s` | Budget for one reading: finding the controller, connecting when needed, and the reply |
+| `--poll[=DUR]` | off; bare flag means `30s` | Read every DUR, connecting and disconnecting each time |
+| `--follow[=DUR]` | off; bare flag means `5s` | Hold one connection and read every DUR |
 
-- Interval values attach with `=` (`--poll=10s`). `--poll 10s` is rejected as a usage error, because Go's flag parser would otherwise treat `10s` as a positional argument. `go-pwr` takes no positional arguments, so any positional argument is a usage error.
-- `--poll` and `--follow` are each a custom `flag.Value` whose `IsBoolFlag()` returns true. A bare flag calls `Set("true")`, which selects the default interval. `--poll=DUR` parses DUR as a Go duration. `--poll=false` means off. A zero, negative or unparseable duration is a usage error.
-- `--poll` and `--follow` together is a usage error.
+- Interval values attach with `=` (`--poll=10s`). `go-pwr` takes no positional arguments, so `--poll 10s` is a usage error.
+- `--poll=false` and `--follow=false` mean off. Setting both `--poll` and `--follow` to on is a usage error. A zero or negative interval is a usage error.
 - Without `--poll` or `--follow`: take one reading, print it, exit.
-- Durations use Go syntax (`500ms`, `10s`, `2m`).
 
 ### Finding the controller
 
-- `go-pwr` always scans briefly before connecting. BlueZ may not let you connect to an address it hasn't seen recently, so `--mac` doesn't skip the scan. It **filters** the scan by address. Without `--mac`, the scan matches the advertised name `GP-PWM-30-SB`.
-- The first match wins. Its address is reported as `device`.
-- The scan counts against `--timeout`.
+- **Machine use requires `--mac`.** Many trailers have this controller, and a campground puts several in range. A shutdown script that read a neighbour's battery could shut lola down, or miss lola's own low battery. So JSON output and both continuous modes refuse to run without `--mac`.
+- Without `--mac`, a one-shot text reading matches the advertised name `GP-PWM-30-SB` and reports the controller it used. This is for a person at a terminal, finding the address to use.
 
 ### Timing
 
-- `--timeout` is one budget per reading. In one-shot and `--poll` mode, it covers scan, connect and reply. In `--follow` mode, it covers the reply, plus scan and connect when a reconnect is needed.
-- The interval is measured from the start of one reading to the start of the next. If a reading takes longer than the interval, the next one starts as soon as it finishes. Readings never overlap, and missed intervals are not made up.
+- The interval runs from the start of one reading to the start of the next. Readings never overlap. If one runs long, the next starts when it finishes, and missed intervals are not made up.
 
 ### Behavior and errors
 
-- **stdout carries only successful readings.** Errors go to stderr as one line each, so a consumer never has to filter them out.
-- **One-shot:** exit status `0` on success, `1` if the reading fails (no device found, connect failure, timeout, incomplete or unparseable reply).
-- **Continuous modes:** a failed reading writes its error to stderr and the loop continues at the next interval. In `--follow` mode, a dropped connection is re-established at the next interval.
+- **stdout carries only successful readings.** Errors go to stderr, one line each.
+- **A reading is printed only if it is complete and plausible.** It must be the whole reply, in order. Its decoded values must be physically possible and agree with each other: for example, the °C and °F fields must describe the same temperature. Anything else is an error. A partial or implausible reply is never printed.
+- **One-shot:** exit status `0` if a reading was printed, `1` otherwise. That includes being interrupted by SIGINT or SIGTERM before a reading was printed.
+- **Continuous modes:** a failed reading writes its error to stderr, and the loop continues at the next interval. In `--follow` mode, a lost connection is re-established at the next interval. SIGINT or SIGTERM ends the loop with exit status `0`.
 - **Usage errors:** exit status `2`, with usage text on stderr.
-- **SIGINT and SIGTERM:** finish or abandon the current reading, disconnect, exit `0`. This matters under systemd.
-- A reply is **complete** when it splits into 30–32 fields **and** no further notification arrives for 250 ms. The 30–32 field count alone isn't enough: with the observed reply, a notification boundary after `…;025;` already gives 31 fields while `008;` is still on its way. A reply that isn't complete before `--timeout` is an error ("incomplete reply"). It is never partially parsed.
-- **Each read starts with an empty buffer,** cleared before the request is written. Notifications that arrive while no read is in progress are dropped. Together with the quiet period, this keeps the tail of one reply from being glued onto the front of the next in `--follow` mode, which would shift every field by one without an error.
+- **Staleness is the consumer's job.** A continuous mode prints nothing while the controller is unreachable, so a consumer must judge freshness from each reading's `time` rather than wait for a line.
+- On exit, `go-pwr` disconnects from the controller.
+
+### Sharing the controller
+
+The controller appears to accept **one connection at a time**: lola could not connect while the phone app was connected. `go-pwr` doesn't arbitrate between consumers. So:
+
+- On lola, **one `go-pwr` process owns the controller.** The intended setup is a single `go-pwr --poll --format json --mac …` writing to a log, which the shutdown script and the dashboard both read.
+- `--poll` leaves the controller free for the phone app between readings. `--follow` locks the phone app, and any other consumer, out for as long as it runs.
 
 ## Output formats
 
@@ -75,10 +79,10 @@ One block per reading, with a blank line between readings in continuous modes:
 
 ```
 time             2026-10-25T15:42:10-04:00
+device           C3:00:00:58:51:40
 battery          13.24 V   AGM
 solar            22.88 V
 charge           0.66 A    Bulk
-state of charge  100%
 temperature      22°C / 72°F
 amp-hours        today 12  yesterday 15  2d 16  3d 4  7d 93
 ```
@@ -88,17 +92,18 @@ amp-hours        today 12  yesterday 15  2d 16  3d 4  7d 93
 One object per line, with units in the key names:
 
 ```json
-{"time":"2026-10-25T15:42:10-04:00","device":"C3:00:00:58:51:40","battery_v":13.24,"solar_v":22.88,"charge_a":0.66,"soc_pct":100,"charge_state":"bulk","charge_state_code":0,"battery_type":"agm","battery_type_code":3,"temp_c":22,"temp_f":72,"ah_today":12,"ah_yesterday":15,"ah_2d":16,"ah_3d":4,"ah_7d":93,"raw":"00655;200;13244;…"}
+{"time":"2026-10-25T15:42:10-04:00","device":"C3:00:00:58:51:40","battery_v":13.24,"solar_v":22.88,"charge_a":0.66,"charge_state":"bulk","charge_state_code":0,"battery_type":"agm","battery_type_code":3,"temp_c":22,"temp_f":72,"ah_today":12,"ah_yesterday":15,"ah_2d":16,"ah_3d":4,"ah_7d":93,"raw":"00655;200;13244;…"}
 ```
 
 - `time` is when the reply was received, in RFC 3339 with the local offset.
 - `device` is the controller's address.
 - `raw` is the untouched reply, so undecoded fields can be worked out later from logs.
-- Voltages and currents are computed from the integer mV and mA values, rounded half-up to the nearest 10 mV or 10 mA, then divided. For example, 655 mA becomes 660 mA, which is 0.66 A. The rounding never touches a float, so results are exact and tests are deterministic.
+- Voltages and currents are given to two decimal places, rounded half-up from the controller's mV and mA values (655 mA is 0.66 A).
+- `ah_3d` and `ah_7d` are named after the app's own labels, which haven't been confirmed (see **Open questions**).
 
 ### Code names
 
-The JSON strings are part of the interface that scripts depend on, so they are fixed here:
+The JSON strings are part of the interface scripts depend on, so they are fixed here:
 
 | Charge state code | JSON `charge_state` | Text label |
 |---|---|---|
@@ -121,42 +126,38 @@ The JSON strings are part of the interface that scripts depend on, so they are f
 | 4 | `custom` | Custom |
 | other | `unknown` | unknown (N) |
 
-An unknown code is never a parse error. The numeric code is always in `charge_state_code` and `battery_type_code`.
+An unknown code is never an error. The numeric code is always in `charge_state_code` and `battery_type_code`.
 
 ## Code structure
 
 Module `github.com/perigrin/go-pwr`:
 
 ```
-cmd/go-pwr/main.go   flags, mode selection, poll/follow loop, signals, exit codes
-status/              parse a reply into a Reading (pure, no Bluetooth)
-format/              Reading → text or JSON (pure)
-ble/                 the only package that touches Bluetooth
-docs/
-LICENSE              Artistic License 2.0
+cmd/go-pwr/   the command: flags, modes, signals, exit codes
+status/       turn a reply into a Reading (pure, no Bluetooth)
+format/       Reading → text or JSON (pure)
+ble/          the only package that touches Bluetooth (Linux/BlueZ)
 ```
 
-- **`status`**: `Parse(raw string) (Reading, error)`. Errors on a field count outside 30–32, or on a non-numeric value in a decoded field.
-- **`format`**: `Text(w io.Writer, r Reading) error` and `JSON(w io.Writer, r Reading) error`.
-- **`ble`**: uses `tinygo.org/x/bluetooth` (pure Go over BlueZ D-Bus on Linux, no cgo). `Connect(ctx, mac string) (*Client, error)` scans (filtered by `mac`, or by name when `mac` is empty), connects and subscribes to `FFF1`. Then `(*Client).Read(ctx) (string, error)` clears its buffer, writes `" "` to `FFF2`, and collects notifications until the reply is complete (30–32 fields plus the 250 ms quiet period) or the context expires. Notifications outside a `Read` are dropped. And `(*Client).Close() error`.
-- The library packages sit at the module root so other Go programs can import them. The poll/follow loop stays in `cmd/` until a library user needs it.
+- The library packages sit at the module root, so other Go programs can import them. The poll/follow loop stays in `cmd/` until a library user needs it.
+- `ble` uses `tinygo.org/x/bluetooth`, which talks to BlueZ over D-Bus without cgo. It builds only for Linux.
+- Deciding when a reply is complete, its assembly, ordering and timing, is pure logic, kept out of `ble` so that tests can drive it.
 
 ## Testing
 
 No mocks and no fake Bluetooth device.
 
-- **Unit tests (`status`, `format`)** use the real reply above, plus real-shaped edge cases: 30- and 31-field replies, a short reply, a non-numeric decoded field, negative temperatures, an unknown charge-state code. These run anywhere with `go test ./...`.
-- **Integration tests (`ble`)** run against the real controller. They connect, read, and check that the reply parses and is plausible (battery 10–16 V, PV 0–30 V, charge 0–30 A). They are skipped unless `GO_PWR_TEST_MAC` is set.
-- **End-to-end tests** build the binary and run it against the real controller: one-shot in both formats, `--poll=…` and `--follow=…` for a few readings each, SIGTERM handling, and usage errors (`--poll 10s`, `--poll` with `--follow`). The usage-error cases don't need hardware and always run. The hardware cases need `GO_PWR_TEST_MAC`.
-- The hardware tests run on lola, which is in Bluetooth range of the controller.
+- **Unit tests** (`status`, `format` and the reply-assembly logic) use replies and notification sequences captured from the real controller. Error cases are made from real captures by cutting or altering them, never invented from scratch. They run anywhere `go test ./...` runs.
+- **Hardware tests** (`ble`, and the command end to end in every mode) run on lola against the real controller. They are skipped unless `GO_PWR_TEST_MAC` is set. Usage-error tests need no hardware and always run.
+- Before implementation leans on them, more captures are needed: night (no PV), Float, cold, and the notification sizes and timing of a reply on lola.
 
 ## Build and deploy
 
-- Cross-compile on the Mac: `GOOS=linux GOARCH=arm GOARM=6 go build ./cmd/go-pwr`, then copy the binary to lola.
-- `go install github.com/perigrin/go-pwr/cmd/go-pwr@latest` for anyone building natively.
-- BlueZ must be running on the target (it is on Raspberry Pi OS). Reading the controller needs no special privileges beyond access to the system D-Bus BlueZ API, which the default `bluetooth` group policy allows. This should be confirmed on lola during implementation.
+- Cross-compile on the Mac for lola (Linux, ARMv6) and copy the binary over. `go install github.com/perigrin/go-pwr/cmd/go-pwr@latest` builds it natively.
+- Prerequisites on the target: BlueZ running, the Bluetooth adapter powered and unblocked, and access to BlueZ on the system D-Bus.
 
 ## Open questions
 
-- Indices 22 and 23 (the 3-day and 7-day amp-hour figures) need checking against the app's History screen.
-- Whether the controller really allows only one connection, or whether it was something about that particular attempt. `--follow`'s documented lock-out depends on this.
+- Indices 20–23 (amp-hours for earlier days): check against the app's History screen.
+- Index 10: what it actually is.
+- Whether the controller really allows only one connection. **Sharing the controller** depends on this.

@@ -1442,3 +1442,10 @@ After acceptance, refinement surfaced four points the decision left open. perigr
 2. **Fatal at startup:** BlueZ not running, and the adapter powered off or blocked, are added to "no adapter" and "access denied". A supervisor restart covers each once it clears. After startup, adapter loss is still retried. *Amends: Behavior and errors.*
 3. **Hardware tests on lola** run as test binaries cross-compiled on the Mac (`GOOS=linux GOARCH=arm GOARM=6 go test -c`) and copied over. No Go toolchain on lola. *Implementation; recorded in the issues.*
 4. **Go version:** Go 1.27.3, installed with gvm and made the default. `go.mod` carries `toolchain go1.27.3`, so any shell picks it up through GOTOOLCHAIN=auto. *Implementation; recorded in the foundation issue.*
+
+### Further owner decisions at chain review
+
+5. **Hardware checks run over `ssh lola`:** every hardware acceptance command runs on lola through `ssh`, against test binaries cross-compiled on the Mac and copied there, so the completion gate can run them from the Mac. *Implementation; recorded in the issues.*
+6. **Fakes are acceptable for the ordering test:** hand-built D-Bus signals may stand in for BlueZ when testing that notifications are delivered in order (chain review PB-18). This is a narrow exception to the no-mocks rule, for that test. *Recorded in the issue.*
+7. **The due date stays 2026-11-08**, although about 14 issues queue on lola's single connection and two need real-world conditions (a low-battery night, a busy-RF site).
+8. **Architecture overview:** perigrin asked during refinement for `docs/architecture/overview.md`, written as the milestone's last issue, after the code.

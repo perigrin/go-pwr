@@ -22,7 +22,8 @@ fmt.Errorf("context: %w", err).
 
 Write a failing test before implementation (TDD). Tests use real data — no
 mocks or stubs. Parser and formatter tests use replies captured from a real
-controller. Bluetooth tests run against the real controller and are skipped
+controller. Error cases are made by cutting or altering real captures, never
+invented from scratch. Bluetooth tests run against the real controller and are skipped
 without `GO_PWR_TEST_MAC`.
 
 ## Controller safety

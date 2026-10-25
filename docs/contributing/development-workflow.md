@@ -15,7 +15,7 @@ The integration and end-to-end tests talk to a real Go Power! GP-PWM-30-SB contr
 GO_PWR_TEST_MAC=C3:00:00:58:51:40 go test ./...
 ```
 
-Run them on a Linux machine in Bluetooth range of the controller, with BlueZ running. Close the Go Power! Connect app first: the controller appears to accept only one connection at a time.
+Run them on a Linux machine in Bluetooth range of the controller, with BlueZ running. The controller appears to accept only one connection at a time, so first close the Go Power! Connect app and stop any `go-pwr` process that owns the controller (on lola, the poller feeding the shutdown script).
 
 ## Branching
 

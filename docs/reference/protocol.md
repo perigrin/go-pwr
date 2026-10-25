@@ -6,7 +6,7 @@ How to read live status from a Go Power! **GP-PWM-30-SB** solar charge controlle
 
 - **Code:** the Go Power! Connect **Android** app, `com.gpelectric.gopowermonitor` 1.7.23 (version code 78), decompiled with jadx 1.5.6. The relevant classes are `pmwbattery.newCode.PwmSbBatteryManager` (requests and replies), `pmwbattery.newCode.PwmResponseParser` (field decoding), `pmwbattery.PwmBatteryUtil` (code tables), `defpackage.factoryReset` (other commands), and `com.brainx.bxble` (the BLE layer).
 - **Observation:** one status reply, captured on 2026-10-25 from one controller set to AGM, while it was bulk-charging in the afternoon. It was compared with the Status screen of the **iPhone** app (version not recorded), read about seven minutes earlier: battery 13.27 V, PV 22.80 V, 0.60 A, 12 Ah, AGM, Bulk, +72°F. The reply gave 13.24 V, 22.88 V, 0.66 A, 12 Ah, AGM, code 0, +72°F.
-- **The two apps don't agree.** The Android code labels charge code 0 "Boost", but the iPhone screen said "Bulk". The Android code parses indices 8, 14 and 19–23 as **hexadecimal**, so `00012` would show 18 Ah, but the iPhone screen showed 12 Ah. A jump from 12 to 18 Ah in seven minutes at 0.6 A is impossible, so the observation supports **decimal**, and this document uses decimal.
+- **The two apps don't agree.** The Android code labels charge code 0 "Boost", but the iPhone screen said "Bulk". The Android code parses indices 8, 14 and 19–23 as **hexadecimal**, so `00012` would show 18 Ah, but the iPhone screen showed 12 Ah. A jump from 12 to 18 Ah in seven minutes at 0.6 A is impossible. That shows the **iPhone app** reads index 19 as decimal. It doesn't prove what the controller means, because each app shows its own interpretation. This document uses decimal. Logging `raw` until amp-hours today passes 9 will settle it: `00010` means decimal, `0000A` means hex.
 - Confidence labels below: **observed once** means it matched the iPhone screen in that single reply. **From code** means it comes only from the Android code or its variable names. Nothing here has been seen across charge states, battery types or temperatures yet.
 
 ## Discovery
@@ -65,7 +65,7 @@ Indices are 0-based. Values are decimal (see **Sources and confidence**) and may
 | 11 | PV (solar) voltage | mV | 22879 → 22.88 V | observed once |
 | 12 | Charge state | code, see below | 0 | observed once (shown as "Bulk") |
 | 14 | Serial | — | 19 | from code (Android reads it as hex, which would make this 25) |
-| 16 | Temperature | °C | +22 | observed once |
+| 16 | Temperature | °C | +22 | consistent with °F (the app showed only °F) |
 | 17 | Temperature | °F | +72 | observed once |
 | 19 | Amp-hours today | Ah | 12 | observed once |
 | 20 | Amp-hours yesterday | Ah | 15 | from code |
@@ -88,7 +88,7 @@ The app decodes no fault codes. Its failure list is always empty in this build.
 
 ### Charge state codes (index 12)
 
-From the Android app's `PwmBatteryUtil.getChargingMode`. Its exact strings, misspellings included, are below. The iPhone app may label them differently: it showed "Bulk" for code 0.
+From the Android app's `PwmBatteryUtil.getChargingMode`. Its exact strings, misspellings included, are below. Only code 0 has been observed. Codes 1–7 come from the Android code alone, and the iPhone app may label them differently: it showed "Bulk" for code 0.
 
 | Code | Android string |
 |---|---|
@@ -127,7 +127,7 @@ The Modbus request described below is also a write path. It was sent to the cont
 A project online (`bigthrilla/camper-ble-bridge`) polls this controller by writing a Modbus RTU "read holding registers" request to `FFF2`: `[addr, 0x03, 0x01, 0x00, 0x00, 0x21]` plus CRC-16, at slave address 1. The controller answers with about 3 KB of `;`-separated **hex** bytes:
 
 - It begins with a header and a block of charge settings in millivolts. For example, `38 40` is 14,400 mV, the AGM absorption voltage.
-- Then come dozens of 16-byte history records, each beginning with `0x50`, then zeros.
+- Then comes a long run in which `0x50` recurs every 16 bytes, followed by zeros. Reading these as history records is an interpretation the dump can't confirm.
 - Two captures a minute apart were byte-for-byte identical, so the dump does not track live readings. Some values in it are near live ones (`59 A3` = 22,947 mV is close to the PV voltage), but they don't change between captures and may be history such as a daily maximum.
 
-That project's parser reads one of the history records, and it takes "battery percent" from the record's `0x50` marker byte, so it always reports 80%. Use the status request above for live data.
+That project's parser reads one of those 16-byte records, and it takes "battery percent" from the record's `0x50` marker byte, so it always reports 80%. Use the status request above for live data.

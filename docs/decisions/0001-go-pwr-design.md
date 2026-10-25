@@ -66,7 +66,7 @@ go-pwr [--mac ADDR] [--format text|json] [--timeout DUR] [--poll[=DUR] | --follo
 - **stdout carries only successful readings.** Errors go to stderr, one line each. When the error concerns a reply that was received, the line includes that reply, escaped as a quoted Go string so that its bytes can't break the line or forge one. That keeps rejected replies as evidence.
 - **A reading is printed only if it is the whole reply and plausible.**
   - *Whole* means the reply as observed: 32 fields, the last empty after a trailing `;`. It is assembled only from notifications received after this reading's request, in the order the controller sent them. A cut-off reply is never printed, even though it can already split into 30 fields. Neither is a reply spliced from the tail of an earlier one and the head of this one, even if it adds up to 32.
-  - **Only three fields can make a reading fail:** battery voltage, PV voltage and charge current. If any of them fails to decode or is outside what the hardware can physically report, the reading fails. Any other field that fails to decode never suppresses the reading. Its key is `null` (see **json**), and the error goes to stderr.
+  - **Only three fields' values can make a reading fail:** battery voltage, PV voltage and charge current. If any of them fails to decode or is outside what the hardware can physically report, the reading fails. Apart from these, a reading fails only on the framing checks: the reply not being whole, or the temperature disagreement below. Any other field that fails to decode never suppresses the reading. Its key is `null` (see **json**), and the error goes to stderr.
   - *Plausible* also covers one check on the reply's framing. When both temperatures decode, °F and °C must describe the same temperature, allowing for each being rounded or truncated to a whole degree on its own. A disagreement means the fields are misaligned, so the reading fails. The temperatures' own values never gate a reading.
   - Bounds and tolerances come from what the hardware and the field format can report. They are never narrowed to the range seen in captures, and must never reject a real reading, however low: a flat battery at night is exactly the reading the shutdown script needs. The exact numbers are set in the implementing issue, each with its reason.
 - **One-shot:** exit status `0` if a reading was printed, `1` otherwise. That includes being interrupted by SIGINT or SIGTERM before a reading was printed.
@@ -92,7 +92,7 @@ The controller appears to accept **one connection at a time**. `go-pwr` doesn't 
 
 ### text (default)
 
-One block per reading, with a blank line between readings in continuous modes:
+One block per reading, with a blank line between readings in continuous modes. A field that failed to decode shows as `?`.
 
 ```
 time             2026-10-25T15:42:10-04:00
@@ -145,7 +145,7 @@ The JSON strings are part of the interface scripts depend on. `bulk` and `agm` h
 | 4 | `custom` | Custom |
 | other | `unknown` | unknown (N) |
 
-Only codes 0 (charge state) and 3 (battery type) have been observed. The rest follow the Android app. An unknown code is never an error, and the numeric code is always in `charge_state_code` and `battery_type_code`.
+Only codes 0 (charge state) and 3 (battery type) have been observed. The rest follow the Android app. An unknown code is never an error. When the field decodes, the number is in `charge_state_code` or `battery_type_code`, and an unlisted number gives the name `unknown`. When the field fails to decode, both the code and the name are `null`. A script must handle `null` in these keys.
 
 ## Shape of the code
 
@@ -160,7 +160,7 @@ No mocks and no fake Bluetooth device.
 
 - **Unit tests** cover reply assembly, decoding and formatting. They use replies and notification sequences captured from the real controller. Error cases are made by cutting or altering real captures, never invented from scratch. Bounds come from hardware and field-format limits, not from captures (see **Behavior and errors**). Accepting real readings, a low battery included, is shown with real captures, never with altered ones. Altered captures may still test code paths that don't depend on real values, such as an unknown code not being an error. Unit tests and usage-error tests run on any machine.
 - **Hardware tests** (Bluetooth, and the command end to end in every mode) run on lola against the real controller, with the owner process stopped. They are skipped unless `GO_PWR_TEST_MAC` is set. They include the trace check in **What go-pwr writes**.
-- More captures are needed before implementation relies on them: **low battery at night** (the shutdown case), no PV, Float, cold, amp-hours today counting past 9 (`00010` means decimal, `0000A` means hex), and the notification sizes and timing of a reply on lola.
+- More captures are needed before implementation relies on them: **low battery at night** (the shutdown case), no PV, Float, cold, hot (how °F at or above 100 is encoded), amp-hours today counting past 9 (`00010` means decimal, `0000A` means hex), and the notification sizes and timing of a reply on lola. The °C/°F framing check must be confirmed against the cold and hot captures before implementation relies on it.
 
 ## Prerequisites
 

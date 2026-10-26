@@ -24,3 +24,13 @@ func TestScanUnsupportedPlatform(t *testing.T) {
 		t.Fatalf("Scan() error = %v, want ErrUnsupportedPlatform", err)
 	}
 }
+
+func TestConnectUnsupportedPlatform(t *testing.T) {
+	conn, err := (&Adapter{}).Connect(context.Background(), "C3:00:00:58:51:40")
+	if !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("Connect() error = %v, want ErrUnsupportedPlatform", err)
+	}
+	if err := conn.Close(); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("Close() error = %v, want ErrUnsupportedPlatform", err)
+	}
+}

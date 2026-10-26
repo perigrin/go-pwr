@@ -217,7 +217,7 @@ func describeTarget(mac string) string {
 // its RSSI would read 0 dBm.
 func (a *Adapter) markConnected(found []Controller) {
 	for i := range found {
-		path := dbus.ObjectPath(string(a.object.Path()) + "/dev_" + strings.ReplaceAll(found[i].Address, ":", "_"))
+		path := devicePath(a, found[i].Address)
 		connected, err := a.conn.Object("org.bluez", path).GetProperty("org.bluez.Device1.Connected")
 		if err != nil {
 			continue

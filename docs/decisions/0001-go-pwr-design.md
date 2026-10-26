@@ -160,7 +160,7 @@ Only codes 0 (charge state) and 3 (battery type) have been observed. The rest fo
 
 ## Testing
 
-No mocks and no fake Bluetooth device.
+Real captures and the real controller come first. A hand-built fake (D-Bus signals, property maps, a fake device) is allowed only where a real condition can't be produced reliably, such as BlueZ omitting a property it normally sends. A fake never stands in for a real capture when the test is proving that a real reading is accepted (perigrin's decision, made during chain review).
 
 - **Unit tests** cover reply assembly, decoding and formatting. They use replies and notification sequences captured from the real controller. Error cases are made by cutting or altering real captures, never invented from scratch. Bounds come from hardware and field-format limits, not from captures (see **Behavior and errors**). Accepting real readings, a low battery included, is shown with real captures, never with altered ones. Altered captures may still test code paths that don't depend on real values, such as an unknown code not being an error. Unit tests and usage-error tests run on any machine.
 - **Hardware tests** (Bluetooth, and the command end to end in every mode) run on lola against the real controller, with the owner process stopped. They are skipped unless `GO_PWR_TEST_MAC` is set. They include the trace check in **What go-pwr writes**.

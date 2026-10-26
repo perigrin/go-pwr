@@ -20,8 +20,10 @@ fmt.Errorf("context: %w", err).
 
 ## Testing
 
-Write a failing test before implementation (TDD). Tests use real data — no
-mocks or stubs. Parser and formatter tests use replies captured from a real
+Write a failing test before implementation (TDD). Tests use real data first.
+A hand-built fake (D-Bus signals, property maps, a fake device) is allowed only
+where a real condition can't be produced reliably, and never to prove that a real
+reading is accepted. Parser and formatter tests use replies captured from a real
 controller. Error cases are made by cutting or altering real captures, never
 invented from scratch. Bluetooth tests run against the real controller and are skipped
 without `GO_PWR_TEST_MAC`.

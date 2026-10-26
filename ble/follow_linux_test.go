@@ -202,47 +202,92 @@ func (b *bluetoothctlSession) disconnect(mac string) {
 	}
 }
 
-// promptly is how soon a drop must be reported: well under the 20 s timeout
-// of the reading, with room for BlueZ to tell and for the link to be closed.
-const promptly = 3 * time.Second
+// reportedWithin is how soon after BlueZ shows the link down the drop must be
+// reported. It is well under status.GapTimeout (1 s), which would end a stalled
+// reply anyway, so only the Follower's own watch of the link can meet it.
+const reportedWithin = 500 * time.Millisecond
 
-// TestFollowDropMidReply drops the link while the reply is arriving. A
+// dropAttempt is what one reading saw of a link dropped under it.
+type dropAttempt struct {
+	reply   string
+	err     error
+	written bool // the request was written before the reading ended
+	// notifiedBeforeDown is how many notifications had arrived when the link
+	// was first seen down; downAt is when that was, and returnedAt when the
+	// reading returned.
+	notifiedBeforeDown int32
+	downAt, returnedAt time.Time
+}
+
+// watchDown reads the Connected property of the controller every 10 ms, until
+// stop is closed, and sends the time it first reads false with the number of
+// notifications counted by then.
+func watchDown(adapter *Adapter, mac string, notified *atomic.Int32, stop <-chan struct{}) <-chan dropAttempt {
+	seen := make(chan dropAttempt, 1)
+	go func() {
+		object := adapter.conn.Object("org.bluez", devicePath(adapter, mac))
+		for {
+			up, err := connected(context.Background(), object)
+			if !up && (err == nil || isGone(err)) {
+				seen <- dropAttempt{downAt: time.Now(), notifiedBeforeDown: notified.Load()}
+				return
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}()
+	return seen
+}
+
+// dropMidReply drops the link while a reply is arriving, and returns what the
+// reading saw, with the follower holding a new, whole connection again. A
 // held connection answers within about 200 ms of the write, but BlueZ takes
 // 2.1 to 2.3 s to drop the link after bluetoothctl disconnect (measured on
-// lola, four drops). So the test tells bluetoothctl to disconnect a lead
-// before it reads, and looks for the lead that lands the drop between the
-// write and the end of the reply: a lead that is too long drops the link
-// before the write, and one that is too short lets the reply complete.
-func TestFollowDropMidReply(t *testing.T) {
-	requireHardware(t)
-	f, mac := newFollower(t)
+// lola). So it tells bluetoothctl to disconnect a lead before it reads, and
+// looks for the lead that lands the drop after the first notification and
+// before the reply is whole. A lead that is too long drops the link before
+// the write or before any notification; one that is too short lets the
+// reply complete.
+func dropMidReply(t *testing.T, f *Follower, mac string, notified *atomic.Int32) dropAttempt {
+	t.Helper()
 	ctl := startBluetoothctl(t)
-
 	requireWholeReading(t, readWhole(t, f))
 	lead, step := 1800*time.Millisecond, 50*time.Millisecond
 	const attempts = 20
 	for attempt := 1; attempt <= attempts; attempt++ {
-		written := false
-		f.conn.afterWrite = func() { written = true }
+		var written atomic.Bool
+		f.conn.afterWrite = func() { written.Store(true) }
+		notified.Store(0)
+		stop := make(chan struct{})
+		down := watchDown(f.adapter, mac, notified, stop)
 		ctl.disconnect(mac)
 		time.Sleep(lead)
-		reply, took, err := followRead(f)
+		reply, _, err := followRead(f)
+		returnedAt := time.Now()
 		if f.conn != nil {
 			f.conn.afterWrite = nil
 		}
+		var saw dropAttempt
+		select {
+		case saw = <-down:
+		case <-time.After(10 * time.Second):
+			t.Fatal("bluetoothctl disconnect left the link up")
+		}
+		close(stop)
+		saw.reply, saw.err, saw.written, saw.returnedAt = reply, err, written.Load(), returnedAt
+
 		switch {
 		case err == nil:
 			t.Logf("attempt %d, lead %v: reply completed before the drop (%d bytes)", attempt, lead, len(reply))
 			lead += step
-			if !waitLinkDown(t, f.adapter, mac, 10*time.Second) {
-				t.Fatal("bluetoothctl disconnect left the link up")
-			}
 			if _, _, err := followRead(f); !errors.Is(err, ErrLinkDropped) {
 				t.Fatalf("reading after the late drop: error = %v, want ErrLinkDropped", err)
 			}
-			readWhole(t, f)
-		case !written:
-			t.Logf("attempt %d, lead %v: link dropped before the write: %v", attempt, lead, err)
+		case !saw.written || saw.notifiedBeforeDown == 0:
+			t.Logf("attempt %d, lead %v: link dropped before the reply began (written %v, %d notifications): %v", attempt, lead, saw.written, saw.notifiedBeforeDown, err)
 			if !errors.Is(err, ErrLinkDropped) {
 				t.Fatalf("error = %v, want ErrLinkDropped", err)
 			}
@@ -250,56 +295,60 @@ func TestFollowDropMidReply(t *testing.T) {
 				lead -= step
 			}
 			step = max(step/2, 10*time.Millisecond)
-			readWhole(t, f)
 		default:
-			t.Logf("attempt %d, lead %v: dropped mid-reply: %v after %v", attempt, lead, err, took.Round(time.Millisecond))
-			var replyErr *status.ReplyError
-			if errors.As(err, &replyErr) {
-				t.Errorf("error = %v carries a reply error (%v), want a dropped link and not an incomplete reply", err, replyErr)
-			}
-			if !errors.Is(err, ErrLinkDropped) {
-				t.Fatalf("error = %v, want ErrLinkDropped", err)
-			}
-			if took > promptly {
-				t.Errorf("drop reported after %v, want under %v", took, promptly)
-			}
+			t.Logf("attempt %d, lead %v: dropped mid-reply after %d notifications: %v, reported %v after the link went down", attempt, lead, saw.notifiedBeforeDown, err, saw.returnedAt.Sub(saw.downAt).Round(time.Millisecond))
 			requireWholeReading(t, readWhole(t, f))
-			return
+			return saw
 		}
+		readWhole(t, f)
 	}
 	t.Fatalf("the link was not dropped mid-reply in %d attempts", attempts)
+	return dropAttempt{}
 }
 
-// TestFollowDropReportedPromptly drops the link after the checks that precede
-// the write, so the request meets a dead link and no reply can come. A
-// Follower that waited for the reply would report that after the whole
-// timeout, as an incomplete reply or none; this one reports the drop as soon
-// as BlueZ does.
+// followerCountingNotifications makes a Follower whose connections count the
+// notifications they take in the returned counter.
+func followerCountingNotifications(t *testing.T) (*Follower, string, *atomic.Int32) {
+	t.Helper()
+	f, mac := newFollower(t)
+	notified := new(atomic.Int32)
+	f.configure = func(c *Conn) { c.onNotified = func() { notified.Add(1) } }
+	return f, mac, notified
+}
+
+func TestFollowDropMidReply(t *testing.T) {
+	requireHardware(t)
+	f, mac, notified := followerCountingNotifications(t)
+	saw := dropMidReply(t, f, mac, notified)
+	var replyErr *status.ReplyError
+	if errors.As(saw.err, &replyErr) {
+		t.Errorf("error = %v carries a reply error (%v), want a dropped link and not an incomplete reply", saw.err, replyErr)
+	}
+	if !errors.Is(saw.err, ErrLinkDropped) {
+		t.Errorf("error = %v, want ErrLinkDropped", saw.err)
+	}
+	if saw.reply != "" {
+		t.Errorf("reply = %q, want none", saw.reply)
+	}
+}
+
+// TestFollowDropReportedPromptly drops the link after the first notification
+// of a reply and before its end. The reply then goes quiet, which the reply's
+// own timing would report as an incomplete reply a second later, and the
+// reading's timeout after 20 s. The Follower watches the link, and reports
+// the drop within reportedWithin of BlueZ showing it down.
 func TestFollowDropReportedPromptly(t *testing.T) {
 	requireHardware(t)
-	f, mac := newFollower(t)
-
-	requireWholeReading(t, readWhole(t, f))
-
-	var downAt time.Time
-	f.conn.beforeWrite = func() {
-		sh(t, "bluetoothctl disconnect "+mac)
-		waitLinkDown(t, f.adapter, mac, 10*time.Second)
-		downAt = time.Now()
+	f, mac, notified := followerCountingNotifications(t)
+	saw := dropMidReply(t, f, mac, notified)
+	reported := saw.returnedAt.Sub(saw.downAt)
+	t.Logf("drop reported %v after the link went down (limit %v, gap timeout %v, reading timeout %v)", reported.Round(time.Millisecond), reportedWithin, status.GapTimeout, followReadBound)
+	if !errors.Is(saw.err, ErrLinkDropped) {
+		t.Errorf("error = %v, want ErrLinkDropped", saw.err)
 	}
-	reply, _, err := followRead(f)
-	reported := time.Since(downAt)
-	t.Logf("reading = %q, %v, reported %v after the link went down (timeout %v)", reply, err, reported.Round(time.Millisecond), followReadBound)
-	if downAt.IsZero() {
-		t.Fatal("the link was never dropped: the request did not reach its write")
+	if reported > reportedWithin {
+		t.Errorf("drop reported %v after the link went down, want under %v", reported, reportedWithin)
 	}
-	if !errors.Is(err, ErrLinkDropped) {
-		t.Fatalf("error = %v, want ErrLinkDropped", err)
-	}
-	if reported > promptly {
-		t.Errorf("drop reported %v after the link went down, want under %v and far under the %v timeout", reported, promptly, followReadBound)
-	}
-	requireWholeReading(t, readWhole(t, f))
 }
 
 // TestFollowRepeatedDrops drops the link five times in a row. Every drop must
@@ -374,4 +423,34 @@ func TestFollowAdapterBlockedThenRecovers(t *testing.T) {
 		t.Fatal("adapter not powered 30s after unblocking it")
 	}
 	requireWholeReading(t, readWhole(t, f))
+}
+
+func TestFollowReadAfterClose(t *testing.T) {
+	f := (&Adapter{}).Follow("C3:00:00:58:51:40")
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Errorf("second Close() error = %v, want nil", err)
+	}
+	if _, err := f.Read(context.Background()); !errors.Is(err, ErrNotConnected) {
+		t.Errorf("Read() after Close: error = %v, want ErrNotConnected", err)
+	}
+}
+
+// TestFollowReadAfterCloseLeavesNoLink closes a Follower that holds a link,
+// and expects the next Read to make none.
+func TestFollowReadAfterCloseLeavesNoLink(t *testing.T) {
+	requireHardware(t)
+	f, mac := newFollower(t)
+	requireWholeReading(t, readWhole(t, f))
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, _, err := followRead(f); !errors.Is(err, ErrNotConnected) {
+		t.Errorf("Read() after Close: error = %v, want ErrNotConnected", err)
+	}
+	if linkUp(t, f.adapter, mac) {
+		t.Error("link up after Close and a Read, want it down")
+	}
 }

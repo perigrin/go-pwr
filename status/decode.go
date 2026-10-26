@@ -82,7 +82,7 @@ type Reading struct {
 	// Warnings holds one error for each plausibility check the reading
 	// failed, for stderr. A warning never changes or suppresses the
 	// reading. Each is identifiable with errors.Is or errors.As, such as
-	// ErrTempMismatch.
+	// ErrTempMismatch or ErrFieldWidth.
 	Warnings []error
 }
 
@@ -149,6 +149,7 @@ func Decode(reply string) (Reading, error) {
 	if w := checkTemps(r.TempC, r.TempF); w != nil {
 		r.Warnings = append(r.Warnings, w)
 	}
+	r.Warnings = append(r.Warnings, checkWidths(fields)...)
 	return r, nil
 }
 

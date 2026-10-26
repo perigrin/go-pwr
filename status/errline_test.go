@@ -166,7 +166,7 @@ func TestErrorLineWrappedReplyError(t *testing.T) {
 func TestWarningLineQuotesReply(t *testing.T) {
 	fields := strings.Split(capturedReply(t), ";")
 	fields[indexTempF] = "+99"
-	reply := strings.Join(fields, ";") + "\r\n"
+	reply := " " + strings.Join(fields, ";") + "\r\n"
 	r, err := Decode(reply)
 	if err != nil {
 		t.Fatalf("Decode: %v", err)

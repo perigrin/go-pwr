@@ -5,6 +5,7 @@ package status
 
 import (
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,5 +107,122 @@ func TestWidthsFromCapturesOnly(t *testing.T) {
 	}
 	if fieldWidths[0] != 5 || fieldWidths[1] != 3 || fieldWidths[31] != 0 {
 		t.Errorf("fieldWidths = %v, want widths 5, 3 ... 0 for fields 0, 1, 31", fieldWidths)
+	}
+}
+
+// widthWarnings returns the field width warnings on r.
+func widthWarnings(r Reading) []*FieldWidthWarning {
+	var ws []*FieldWidthWarning
+	for _, w := range r.Warnings {
+		if errors.Is(w, ErrFieldWidth) {
+			var fw *FieldWidthWarning
+			if errors.As(w, &fw) {
+				ws = append(ws, fw)
+			}
+		}
+	}
+	return ws
+}
+
+func TestDecodeWidthMismatchWarns(t *testing.T) {
+	r, err := Decode(alteredReply(t, 2, "1324"))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	ws := widthWarnings(r)
+	if len(ws) != 1 || ws[0].Index != 2 || ws[0].Got != 4 || ws[0].Want != 5 {
+		t.Fatalf("warnings = %v, want one for field 2 (4 bytes, want 5)", r.Warnings)
+	}
+	if r.BatteryMV != 1324 {
+		t.Errorf("BatteryMV = %d, want the reading returned as it decoded, 1324", r.BatteryMV)
+	}
+}
+
+// copyFile copies src to dst, creating dst's directory.
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestWidthsIgnoreAlteredFiles copies the real captures into a temporary
+// directory and adds altered ones, one body-only and one lola-style, with
+// every field a different width. The derived table must not change.
+func TestWidthsIgnoreAlteredFiles(t *testing.T) {
+	root := t.TempDir()
+	for _, f := range realCaptureFiles(t, "testdata") {
+		rel, err := filepath.Rel("testdata", f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copyFile(t, f, filepath.Join(root, rel))
+	}
+	want := deriveWidths(t, root)
+
+	wide := strings.ReplaceAll(strings.TrimSpace(capturedReply(t)), ";", "0;")
+	for _, name := range []string{"altered-reply-wide.txt", "reply-derived-from-altered.txt", "reply-altered-wide.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(wide), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seq := "# trace: altered\n1 " + hex.EncodeToString([]byte(" "+wide+"\r\n")) + "\n"
+	for _, name := range []string{"altered-session-1-reply-99.seq.txt", "session-1-reply-99-altered.seq.txt", "session-1-reply-99-derived.seq.txt"} {
+		if err := os.WriteFile(filepath.Join(root, "lola-timing", name), []byte(seq), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := deriveWidths(t, root); got != want {
+		t.Errorf("widths with altered files added = %v, want unchanged %v", got, want)
+	}
+	if want != fieldWidths {
+		t.Errorf("copied captures derive %v, want fieldWidths %v", want, fieldWidths)
+	}
+}
+
+// TestWidthsNoWarningOnRealCaptures decodes every real capture, the body-only
+// afternoon reply and the framed lola replies, and expects no warning.
+func TestWidthsNoWarningOnRealCaptures(t *testing.T) {
+	files := realCaptureFiles(t, "testdata")
+	if len(files) != 22 {
+		t.Fatalf("%d real captures, want 22", len(files))
+	}
+	for _, f := range files {
+		r, err := Decode(readCapture(t, f))
+		if err != nil {
+			t.Fatalf("%s: Decode: %v", f, err)
+		}
+		if len(r.Warnings) != 0 {
+			t.Errorf("%s: warnings %v, want none", f, r.Warnings)
+		}
+	}
+}
+
+// TestWidthsTemperaturesVariable gives the three temperature fields widths
+// no capture shows. They raise no width warning.
+func TestWidthsTemperaturesVariable(t *testing.T) {
+	for _, c := range []struct{ c, f, other string }{
+		{"-05", "+23", "-05"},
+		{"+38", "+100", "+38"},
+		{"-40", "-40", "-40"},
+		{"5", "+9", "5"},
+		{"+0022", "+00072", "+000022"},
+	} {
+		fields := strings.Split(capturedReply(t), ";")
+		fields[indexTempC], fields[indexTempF], fields[indexTempOther] = c.c, c.f, c.other
+		r, err := Decode(strings.Join(fields, ";"))
+		if err != nil {
+			t.Fatalf("Decode %v: %v", c, err)
+		}
+		if ws := widthWarnings(r); len(ws) != 0 {
+			t.Errorf("temperatures %v: width warnings %v, want none", c, ws)
+		}
 	}
 }

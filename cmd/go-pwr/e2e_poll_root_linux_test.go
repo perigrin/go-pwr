@@ -13,14 +13,21 @@ import (
 	"time"
 )
 
-// pollThroughFailure starts --poll, lets one reading arrive, then breaks
-// lola with breakIt. It checks that go-pwr writes errors on stderr and keeps
-// running, with no more readings, then repairs lola with fix and checks that
-// readings resume in the same process, which then exits 0 on SIGTERM.
+// pollThroughFailure runs throughFailure with --poll.
 func pollThroughFailure(t *testing.T, mac string, breakIt, fix func(*testing.T)) {
 	t.Helper()
+	throughFailure(t, mac, "--poll=8s", breakIt, fix)
+}
+
+// throughFailure starts go-pwr with a continuous mode (--poll or --follow),
+// lets one reading arrive, then breaks lola with breakIt. It checks that
+// go-pwr writes errors on stderr and keeps running, with no more readings,
+// then repairs lola with fix and checks that readings resume in the same
+// process, which then exits 0 on SIGTERM.
+func throughFailure(t *testing.T, mac, mode string, breakIt, fix func(*testing.T)) {
+	t.Helper()
 	restoreOnCleanup(t)
-	r := startGoPwr(t, "--mac", mac, "--poll=8s", "--timeout=10s", "--format", "json")
+	r := startGoPwr(t, "--mac", mac, mode, "--timeout=10s", "--format", "json")
 	if !r.waitFor(60*time.Second, func() bool { return r.readings() >= 1 }) {
 		t.Fatalf("no reading in 60 s before the failure; stderr %q", r.stderr)
 	}
@@ -81,23 +88,25 @@ func TestPollContinuesAfterBlueZRestart(t *testing.T) {
 		})
 }
 
+// rebindAdapter binds hci0 again and waits for it to be present and powered.
+func rebindAdapter(t *testing.T) {
+	t.Helper()
+	sh(t, "test -e /sys/bus/serial/drivers/hci_uart_bcm/serial0-0 || echo serial0-0 | tee /sys/bus/serial/drivers/hci_uart_bcm/bind")
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat("/sys/class/bluetooth/hci0"); err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !waitPowered(t) {
+		t.Fatal("adapter not powered 30 s after rebinding it")
+	}
+}
+
 func TestPollContinuesAfterAdapterUnbound(t *testing.T) {
 	mac := requireRoot(t)
-	pollThroughFailure(t, mac,
-		unbindAdapter,
-		func(t *testing.T) {
-			sh(t, "test -e /sys/bus/serial/drivers/hci_uart_bcm/serial0-0 || echo serial0-0 | tee /sys/bus/serial/drivers/hci_uart_bcm/bind")
-			deadline := time.Now().Add(30 * time.Second)
-			for time.Now().Before(deadline) {
-				if _, err := os.Stat("/sys/class/bluetooth/hci0"); err == nil {
-					break
-				}
-				time.Sleep(200 * time.Millisecond)
-			}
-			if !waitPowered(t) {
-				t.Fatal("adapter not powered 30 s after rebinding it")
-			}
-		})
+	pollThroughFailure(t, mac, unbindAdapter, rebindAdapter)
 }
 
 // wantPollStartupError starts --poll and checks the startup-failure

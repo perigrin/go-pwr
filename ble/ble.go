@@ -15,6 +15,39 @@
 // On an operating system other than Linux every operation returns
 // ErrUnsupportedPlatform.
 //
+// # API
+//
+// A reading goes through these operations, in this order:
+//
+//	adapter, err := ble.Open()
+//	found, err := adapter.Scan(ctx, mac)   // []Controller; mac may be empty
+//	conn, err := adapter.Connect(ctx, mac) // *Conn
+//	reply, err := conn.RequestStatus(ctx)  // the whole reply, as a string
+//	err = conn.Close()
+//
+// RequestStatus is the only operation that writes to the controller, and
+// it takes no bytes. There is no function that does. The request is the
+// constant statusRequest, one byte, 0x20, passed as []byte{statusRequest} at
+// the one GATT write call site, and TestSingleStatusWriteCallSite and
+// TestNoExportedByteWriter guard both.
+//
+// Before every write, RequestStatus checks that its target is the
+// characteristic with UUID 0000fff2-0000-1000-8000-00805f9b34fb under the
+// service 0000fff0-0000-1000-8000-00805f9b34fb of the connected device. Its
+// writes are 0x20 to FFF2 and the FFF1 notification descriptor on and off,
+// which BlueZ writes for StartNotify and StopNotify. The first request turns
+// notifications on, and Close turns them off.
+//
+// The request and the notifications share a D-Bus connection of their own
+// with a sequential signal handler. The write reply's sequence number then
+// separates the notifications of this reply from late ones of an earlier
+// reply, and the reply is assembled in that order (see the status package).
+// A request that a context abandoned leaves its reply still arriving, so the
+// next request first waits for it to finish or to time out.
+//
+// No settle delay follows Connect; see "Settle delay" in
+// docs/reference/protocol.md.
+//
 // # Errors
 //
 // Errors from Open and Adapter.Check say when they happened and, when they
@@ -65,6 +98,13 @@ import (
 	"fmt"
 	"time"
 )
+
+// statusRequest is the one value this package ever writes to the controller's
+// FFF2 characteristic: a single space, which asks for a status reply. It is a
+// constant, so no code can change it, and it is passed as []byte{statusRequest}
+// at the one GATT write call site. TestSingleStatusWriteCallSite holds that,
+// and that the name is declared and used nowhere else.
+const statusRequest byte = 0x20
 
 // controllerName is the Bluetooth name the GP-PWM-30-SB advertises.
 const controllerName = "GP-PWM-30-SB"
@@ -164,6 +204,10 @@ type Controller struct {
 // returns it for an address BlueZ has no device for, because no scan has found
 // it.
 var ErrNotFound = errors.New("controller not found")
+
+// ErrNotConnected is returned, wrapped, by RequestStatus on a Conn that was
+// never connected, or whose Close has been called. Nothing was written.
+var ErrNotConnected = errors.New("not connected")
 
 // ErrUnsupportedPlatform is returned by every operation on an operating
 // system where the Bluetooth layer has no implementation.

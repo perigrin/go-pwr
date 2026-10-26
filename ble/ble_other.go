@@ -21,15 +21,20 @@ func (a *Adapter) Scan(ctx context.Context, mac string) ([]Controller, error) {
 	return nil, ErrUnsupportedPlatform
 }
 
-// Connection is a link to the controller. On this platform none can be made.
-type Connection struct{}
+// Conn is a link to the controller. On this platform none can be made.
+type Conn struct{}
 
 // Connect returns ErrUnsupportedPlatform.
-func (a *Adapter) Connect(ctx context.Context, mac string) (*Connection, error) {
+func (a *Adapter) Connect(ctx context.Context, mac string) (*Conn, error) {
 	return nil, ErrUnsupportedPlatform
 }
 
 // Close returns ErrUnsupportedPlatform.
-func (c *Connection) Close() error {
+func (c *Conn) Close() error {
 	return ErrUnsupportedPlatform
+}
+
+// RequestStatus returns ErrUnsupportedPlatform.
+func (c *Conn) RequestStatus(ctx context.Context) (string, error) {
+	return "", ErrUnsupportedPlatform
 }

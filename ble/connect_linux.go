@@ -25,13 +25,28 @@ const (
 // it to change.
 const pollInterval = 50 * time.Millisecond
 
-// Connection is a link to the controller, held until Close.
-type Connection struct {
+// Conn is a link to the controller, held until Close.
+type Conn struct {
 	adapter *Adapter
 	object  dbus.BusObject
+	// closing is closed by Close, to end a request that is waiting.
+	closing chan struct{}
 
 	mu     sync.Mutex
 	closed bool
+
+	// requests serialises RequestStatus, and guards link.
+	requests sync.Mutex
+	link     *statusLink
+
+	// onDrop, when set, hears of each notification that was not used, in
+	// place of the log. beforeWrite, when set, runs after the checks and
+	// before the closing check that precedes the write; afterWrite, when set,
+	// runs right after the write returns. Tests set them before the first
+	// request.
+	onDrop      func(error)
+	beforeWrite func()
+	afterWrite  func()
 }
 
 // devicePath is the object path BlueZ gives the device with the address mac.
@@ -49,7 +64,7 @@ func devicePath(a *Adapter, mac string) dbus.ObjectPath {
 // held and nothing is left running. The connect is made with a context-aware
 // D-Bus call, not the library's Connect, which waits for the link with no way
 // to stop it. Every error matches ErrRetryable.
-func (a *Adapter) Connect(ctx context.Context, mac string) (*Connection, error) {
+func (a *Adapter) Connect(ctx context.Context, mac string) (*Conn, error) {
 	if _, err := bluetooth.ParseMAC(mac); err != nil {
 		return nil, fmt.Errorf("connect: invalid address %q: %w", mac, err)
 	}
@@ -72,7 +87,7 @@ func (a *Adapter) Connect(ctx context.Context, mac string) (*Connection, error) 
 		}
 		return nil, retryableError(describe("connect "+mac, err))
 	}
-	return &Connection{adapter: a, object: object}, nil
+	return &Conn{adapter: a, object: object, closing: make(chan struct{})}, nil
 }
 
 // connect connects unless the link is already up.
@@ -108,18 +123,34 @@ func connected(ctx context.Context, object dbus.BusObject) (bool, error) {
 	return up, nil
 }
 
-// Close ends the link: it asks BlueZ to disconnect, then waits up to
-// closeBound for the link to be down. A link that is already down is not an
+// Close ends the link: it turns notifications off if a status request
+// turned them on, asks BlueZ to disconnect, then waits up to closeBound for the link to be down. A link that is already down is not an
 // error, and Close a second time returns nil without doing anything.
-func (c *Connection) Close() error {
+func (c *Conn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return nil
 	}
 	c.closed = true
+	close(c.closing)
+	// A request in flight sees closing and returns; wait for it, then turn
+	// notifications off before the link goes down.
+	c.requests.Lock()
+	link := c.link
+	c.link = nil
+	c.requests.Unlock()
+	var linkErr error
+	if link != nil {
+		if err := link.close(); err != nil {
+			linkErr = fmt.Errorf("close status link: %w", err)
+		}
+	}
 	if err := disconnect(c.object); err != nil {
-		return retryableError(fmt.Errorf("disconnect %s: %w", c.object.Path(), err))
+		return retryableError(errors.Join(linkErr, fmt.Errorf("disconnect %s: %w", c.object.Path(), err)))
+	}
+	if linkErr != nil {
+		return retryableError(linkErr)
 	}
 	return nil
 }

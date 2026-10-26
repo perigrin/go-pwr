@@ -236,6 +236,16 @@ Service discovery is not the bottleneck the library's hard-wired 10 s `ServicesR
 
 Close takes 2–5 s. It runs after the reply, bounded by `closeBound` (10 s, twice the slowest close measured), and `--timeout` bounds the reading, not the disconnect.
 
+### Settle delay
+
+The Android app waits 2 s after connecting before its first request. **Decision: `go-pwr` does not copy the wait.** `RequestStatus` writes as soon as it has subscribed to `FFF1`, and no delay is added after `Connect`.
+
+Measured on 2026-10-26 on lola by `TestRequestStatusSettle` (`ble/status_linux_test.go`), with the controller in the same place as the timing capture: 20 fresh connections, each a scan-found device, `Connect`, one status request and `Close`. **20 of 20** returned a whole reply: 169 bytes, framed by a space and CRLF, that decoded with no warning and no field error. One more connect failed with `le-connection-abort-by-local` before any request, and was repeated; it is not one of the 20.
+
+The request is not sent the instant `Connect` returns, because the first request has to find BlueZ on the dedicated D-Bus connection, check the services, list the GATT objects, match the notification signal and turn on notifications first. That setup is the shortest gap this package can leave. Measured from `Connect` returning to the write returning: 405 ms to 1.231 s, median 481 ms (the slowest was the first connection of the run, 1.231 s; the next slowest was 732 ms). So the measurement shows that a request 0.4 s after the link is up gets a whole reply, not that one at 0 s would. Nothing here argues for a delay, and nothing below 0.4 s was tried.
+
+BlueZ never delivered a notification of a reply before the write's method return. A notification at or below the write reply's sequence number would have been dropped and logged as predating the request, and none was, in the 20 connections or the 50 requests on one connection (`TestRequestStatusRepeatedOnOneConnection`, also whole each time). Every notification of a reply arrived after the write returned.
+
 ### Handle map
 
 From the discovery on the first connection. Read By Group Type and Read By Type named the services, characteristic declarations and values. The single Find Information Request (`0x0012`–`0xffff`) got Attribute Not Found, so the controller never named a descriptor: the two CCCD handles below are **inferred** from the one-handle gap after each notifying or indicating value, which is where BlueZ wrote its CCCD values.

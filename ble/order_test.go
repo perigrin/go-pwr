@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/perigrin/go-pwr/status"
 )
 
 const (
@@ -161,5 +163,186 @@ func TestOrderedDeliveryInProcess(t *testing.T) {
 		if idx := binary.BigEndian.Uint64(d.chunk); idx != uint64(i) {
 			t.Fatalf("notification %d carries payload %d: delivered out of order", i, idx)
 		}
+	}
+}
+
+// TestOrderedDeliveryIgnoresOtherPaths feeds signals for other devices, other
+// characteristics, other interfaces and other members through the real
+// handler, between the notifications that count, and checks that only
+// FFF1 of the connected device reaches the sink.
+func TestOrderedDeliveryIgnoresOtherPaths(t *testing.T) {
+	handler, ch := signalChannel()
+	c := &notificationConsumer{path: fff1Path}
+	wait := recordSink(c, ch, 3)
+
+	otherInterface := valueSignal(fff1Path, 0, []byte("other interface"))
+	otherInterface.Body[0] = "org.bluez.Device1"
+	otherMember := valueSignal(fff1Path, 0, []byte("other member"))
+	otherMember.Name = "org.freedesktop.DBus.Properties.PropertiesChanged2"
+	interfacesAdded := valueSignal(fff1Path, 0, []byte("interfaces added"))
+	interfacesAdded.Name = "org.freedesktop.DBus.ObjectManager.InterfacesAdded"
+	notifying := valueSignal(fff1Path, 0, nil)
+	notifying.Body[1] = map[string]dbus.Variant{"Notifying": dbus.MakeVariant(true)}
+
+	signals := []*dbus.Signal{
+		valueSignal(fff1Path, 1, []byte("first")),
+		valueSignal(fff2Path, 2, []byte("write characteristic")),
+		valueSignal(otherFFF1Path, 3, []byte("other device")),
+		valueSignal(fff1Path+"/desc0010", 4, []byte("descriptor of FFF1")),
+		valueSignal(fff1Path[:len(fff1Path)-1], 5, []byte("path prefix")),
+		valueSignal("/", 6, []byte("root")),
+		otherInterface, otherMember, interfacesAdded, notifying,
+		valueSignal(fff1Path, 7, []byte("second")),
+		nil,
+		valueSignal(fff1Path, 8, []byte("third")),
+	}
+	for i, sig := range signals {
+		if sig != nil && sig.Sequence == 0 {
+			sig.Sequence = dbus.Sequence(100 + i)
+		}
+		handler.DeliverSignal("org.freedesktop.DBus.Properties", "PropertiesChanged", sig)
+	}
+
+	var texts []string
+	for _, d := range wait() {
+		texts = append(texts, string(d.chunk))
+	}
+	if got, want := strings.Join(texts, "|"), "first|second|third"; got != want {
+		t.Errorf("sink saw %q, want %q", got, want)
+	}
+	handler.Terminate()
+}
+
+// TestOrderedDeliveryDropsUnusableSignals checks that a signal for FFF1 that
+// cannot be ordered or read is reported, never passed on.
+func TestOrderedDeliveryDropsUnusableSignals(t *testing.T) {
+	noSequence := valueSignal(fff1Path, 0, []byte("no sequence"))
+	shortBody := valueSignal(fff1Path, 2, nil)
+	shortBody.Body = shortBody.Body[:1]
+	badChanged := valueSignal(fff1Path, 3, nil)
+	badChanged.Body[1] = "not a map"
+	badValue := valueSignal(fff1Path, 4, nil)
+	badValue.Body[1] = map[string]dbus.Variant{"Value": dbus.MakeVariant("not bytes")}
+
+	var reasons []error
+	var sunk []delivered
+	c := &notificationConsumer{
+		path:    fff1Path,
+		sink:    func(key uint64, chunk []byte) { sunk = append(sunk, delivered{key, chunk}) },
+		dropped: func(err error) { reasons = append(reasons, err) },
+	}
+	for _, sig := range []*dbus.Signal{noSequence, shortBody, badChanged, badValue} {
+		c.handle(sig)
+	}
+	if len(sunk) != 0 {
+		t.Errorf("sink saw %d unusable signals, want none", len(sunk))
+	}
+	if len(reasons) != 4 {
+		t.Fatalf("dropped heard of %d signals, want 4: %v", len(reasons), reasons)
+	}
+	if !errors.Is(reasons[0], errNoSequence) {
+		t.Errorf("signal without a sequence dropped for %v, want errNoSequence", reasons[0])
+	}
+	for _, err := range reasons[1:] {
+		if !errors.Is(err, errBadSignal) {
+			t.Errorf("malformed signal dropped for %v, want errBadSignal", err)
+		}
+	}
+}
+
+// readResult is what one add to the read buffer returned.
+type readResult struct {
+	reply string
+	whole bool
+	err   error
+}
+
+// readThrough runs one read of chunks through handler. seqs gives each
+// chunk's sequence number. It returns the final add's result.
+func readThrough(t *testing.T, handler sequentialHandler, b *readBuffer, results <-chan readResult, boundary uint64, chunks [][]byte, seqs []uint64) readResult {
+	t.Helper()
+	b.begin(boundary)
+	for i, chunk := range chunks {
+		handler.DeliverSignal("org.freedesktop.DBus.Properties", "PropertiesChanged", valueSignal(fff1Path, seqs[i], chunk))
+	}
+	var last readResult
+	for range chunks {
+		select {
+		case last = <-results:
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for the consumer")
+		}
+	}
+	return last
+}
+
+// consumerToBuffer wires a consumer to a read buffer and returns the results
+// of every add, in order.
+func consumerToBuffer(ch <-chan *dbus.Signal, b *readBuffer) <-chan readResult {
+	results := make(chan readResult, 64)
+	c := &notificationConsumer{path: fff1Path}
+	c.sink = func(key uint64, chunk []byte) {
+		reply, whole, err := b.add(key, chunk)
+		results <- readResult{reply, whole, err}
+	}
+	go c.consume(ch)
+	return results
+}
+
+// TestOrderedDeliveryAssemblesRealReplies runs all 21 real replies through
+// the handler, with gaps in the sequence numbers, and checks each comes out
+// whole and byte for byte.
+func TestOrderedDeliveryAssemblesRealReplies(t *testing.T) {
+	handler, ch := signalChannel()
+	defer handler.Terminate()
+	b := newReadBuffer()
+	results := consumerToBuffer(ch, b)
+
+	seq := uint64(10)
+	for n := 1; n <= 21; n++ {
+		chunks := lolaChunks(t, n)
+		boundary := seq
+		seqs := make([]uint64, len(chunks))
+		for i := range chunks {
+			seq += 1 + uint64((n+i)%4) // gaps: other messages share the counter
+			seqs[i] = seq
+		}
+		got := readThrough(t, handler, b, results, boundary, chunks, seqs)
+		var want strings.Builder
+		for _, c := range chunks {
+			want.Write(c)
+		}
+		if got.err != nil || !got.whole || got.reply != want.String() {
+			t.Fatalf("reply %d: got %q whole %v err %v, want whole %q", n, got.reply, got.whole, got.err, want.String())
+		}
+	}
+}
+
+// TestOrderedDeliveryRefusesReorderedSequence delivers a real reply with two
+// middle chunks swapped, as the library's callback did. The swap passes the
+// whole-reply rule on its own, so only the keys catch it: the read must fail
+// and never come out whole.
+func TestOrderedDeliveryRefusesReorderedSequence(t *testing.T) {
+	handler, ch := signalChannel()
+	defer handler.Terminate()
+	b := newReadBuffer()
+	results := consumerToBuffer(ch, b)
+
+	chunks := lolaChunks(t, 1)
+	chunks[3], chunks[4] = chunks[4], chunks[3]
+	seqs := make([]uint64, len(chunks))
+	for i := range seqs {
+		seqs[i] = uint64(11 + i)
+	}
+	// Swapped chunks reach the consumer carrying the sequence numbers godbus
+	// stamped them with, so the keys fall where the chunks were swapped.
+	seqs[3], seqs[4] = seqs[4], seqs[3]
+
+	got := readThrough(t, handler, b, results, 10, chunks, seqs)
+	if got.whole {
+		t.Fatalf("a reordered read came out whole: %q", got.reply)
+	}
+	if !errors.Is(got.err, status.ErrKeyOrder) {
+		t.Errorf("reordered read ended with %v, want status.ErrKeyOrder", got.err)
 	}
 }

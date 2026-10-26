@@ -75,8 +75,14 @@ func TestUptimeIgnoresWallClockStep(t *testing.T) {
 		t.Skip("needs root: run with sudo -n")
 	}
 	t.Cleanup(func() {
-		exec.Command("systemctl", "start", "systemd-timesyncd").Run()
-		exec.Command("timedatectl", "set-ntp", "true").Run()
+		for _, args := range [][]string{
+			{"systemctl", "start", "systemd-timesyncd"},
+			{"timedatectl", "set-ntp", "true"},
+		} {
+			if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+				t.Errorf("restore %v: %v: %s", args, err, out)
+			}
+		}
 	})
 	if out, err := exec.Command("systemctl", "stop", "systemd-timesyncd").CombinedOutput(); err != nil {
 		t.Fatalf("stop systemd-timesyncd: %v: %s", err, out)
@@ -92,11 +98,21 @@ func TestUptimeIgnoresWallClockStep(t *testing.T) {
 	start := time.Now()
 
 	setWallClock(t, time.Now().Unix()+3600)
+	steppedBack := false
+	// Registered after the timesyncd cleanup, so it runs first: if the
+	// step back below never ran, an offline lola must not stay an hour
+	// ahead.
+	t.Cleanup(func() {
+		if !steppedBack {
+			setWallClock(t, time.Now().Unix()-3600)
+		}
+	})
 	upForward, err := Uptime()
 	if err != nil {
 		t.Fatalf("Uptime: %v", err)
 	}
 	setWallClock(t, time.Now().Unix()-3600)
+	steppedBack = true
 	upBack, err := Uptime()
 	if err != nil {
 		t.Fatalf("Uptime: %v", err)

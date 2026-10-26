@@ -152,3 +152,211 @@ func TestScanTimeToFindController(t *testing.T) {
 		t.Fatal("no scan found the controller")
 	}
 }
+
+// scanSlack is how far a scan's length may differ from the window, or from a
+// cancel, before a test calls it early or late.
+const scanSlack = time.Second
+
+func TestScanFindsControllerByMac(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+
+	started := time.Now()
+	found, err := adapter.Scan(context.Background(), mac)
+	took := time.Since(started)
+	t.Logf("Scan(%s) = %+v, %v after %v (window %v)", mac, found, err, took.Round(time.Millisecond), scanWindow)
+
+	if err != nil {
+		t.Fatalf("Scan() error = %v, want the controller", err)
+	}
+	if len(found) != 1 || !strings.EqualFold(found[0].Address, mac) {
+		t.Fatalf("Scan() = %+v, want only %s", found, mac)
+	}
+	if took >= scanWindow-scanSlack {
+		t.Errorf("Scan() took %v of a %v window, want it to stop at the match", took, scanWindow)
+	}
+	if !waitNotDiscovering(t, adapter) {
+		t.Error("adapter still discovering 2s after the match, want discovery stopped")
+	}
+}
+
+func TestScanListsControllersWithoutMac(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+
+	started := time.Now()
+	found, err := adapter.Scan(context.Background(), "")
+	took := time.Since(started)
+	t.Logf("Scan() = %+v, %v after %v (window %v)", found, err, took.Round(time.Millisecond), scanWindow)
+
+	if err != nil {
+		t.Fatalf("Scan() error = %v, want the controllers heard", err)
+	}
+	if took < scanWindow-scanSlack {
+		t.Errorf("Scan() without an address took %v of a %v window, want the whole window", took, scanWindow)
+	}
+	seen := false
+	for _, c := range found {
+		if strings.EqualFold(c.Address, mac) {
+			seen = true
+		}
+		if c.Address != strings.ToUpper(c.Address) {
+			t.Errorf("Address %q is not upper case", c.Address)
+		}
+		if !c.Connected && c.RSSI >= 0 {
+			t.Errorf("%s: RSSI %d dBm and not connected, want a negative signal strength", c.Address, c.RSSI)
+		}
+	}
+	if !seen {
+		t.Errorf("Scan() = %+v, want it to include %s", found, mac)
+	}
+	if !waitNotDiscovering(t, adapter) {
+		t.Error("adapter still discovering 2s after the window, want discovery stopped")
+	}
+}
+
+// otherMac returns mac with its last octet changed, a valid address that
+// is not the test controller's.
+func otherMac(t *testing.T, mac string) string {
+	t.Helper()
+	if len(mac) != 17 {
+		t.Fatalf("GO_PWR_TEST_MAC = %q, want an address like C3:00:00:58:51:40", mac)
+	}
+	last := mac[15:]
+	if strings.EqualFold(last, "41") {
+		return mac[:15] + "42"
+	}
+	return mac[:15] + "41"
+}
+
+func TestScanAbsentMacNotFound(t *testing.T) {
+	adapter := openAdapter(t)
+	absent := otherMac(t, os.Getenv("GO_PWR_TEST_MAC"))
+
+	started := time.Now()
+	found, err := adapter.Scan(context.Background(), absent)
+	took := time.Since(started)
+	t.Logf("Scan(%s) = %+v, %v after %v (window %v)", absent, found, err, took.Round(time.Millisecond), scanWindow)
+
+	if !errors.Is(err, ErrNotFound) || !errors.Is(err, ErrRetryable) {
+		t.Errorf("Scan() error = %v, want ErrNotFound and ErrRetryable", err)
+	}
+	if len(found) != 0 {
+		t.Errorf("Scan() = %+v for an absent address, want nothing", found)
+	}
+	if took < scanWindow-scanSlack {
+		t.Errorf("Scan() took %v, want the whole %v window before giving up", took, scanWindow)
+	}
+	if !waitNotDiscovering(t, adapter) {
+		t.Error("adapter still discovering 2s after the window, want discovery stopped")
+	}
+}
+
+func TestScanMacCaseInsensitive(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+	lower := strings.ToLower(mac)
+	if lower == mac {
+		t.Fatalf("GO_PWR_TEST_MAC = %q has no upper-case letters to lower; use an address with a letter in it", mac)
+	}
+
+	found, err := adapter.Scan(context.Background(), lower)
+	t.Logf("Scan(%s) = %+v, %v", lower, found, err)
+	if err != nil {
+		t.Fatalf("Scan() error = %v, want the controller", err)
+	}
+	if len(found) != 1 || found[0].Address != mac {
+		t.Errorf("Scan() = %+v, want %s in upper case", found, mac)
+	}
+}
+
+func TestScanCancelledStopsDiscovery(t *testing.T) {
+	adapter := openAdapter(t)
+	absent := otherMac(t, os.Getenv("GO_PWR_TEST_MAC"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(2*time.Second, cancel)
+	started := time.Now()
+	found, err := adapter.Scan(ctx, absent)
+	took := time.Since(started)
+	t.Logf("Scan() = %+v, %v after %v, cancelled at 2s", found, err, took.Round(time.Millisecond))
+
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrRetryable) {
+		t.Errorf("Scan() error = %v, want context.Canceled and ErrRetryable", err)
+	}
+	if took > 2*time.Second+scanSlack {
+		t.Errorf("Scan() took %v, want it back within %v of the cancel", took, scanSlack)
+	}
+	if !waitNotDiscovering(t, adapter) {
+		t.Error("adapter still discovering 2s after the cancel, want discovery stopped")
+	}
+}
+
+// TestScanAdapterBlockedMidScan blocks the adapter with rfkill two seconds into
+// a scan for an absent address, which would otherwise run the whole window.
+// It needs root and restores lola on cleanup.
+func TestScanAdapterBlockedMidScan(t *testing.T) {
+	requireRoot(t)
+	restoreOnCleanup(t)
+	adapter := openAdapter(t)
+	absent := otherMac(t, os.Getenv("GO_PWR_TEST_MAC"))
+
+	blocked := make(chan struct{})
+	go func() {
+		defer close(blocked)
+		time.Sleep(2 * time.Second)
+		sh(t, "rfkill block bluetooth")
+	}()
+	started := time.Now()
+	found, err := adapter.Scan(context.Background(), absent)
+	took := time.Since(started)
+	<-blocked
+	t.Logf("Scan() = %+v, %v after %v, blocked at 2s (window %v)", found, err, took.Round(time.Millisecond), scanWindow)
+
+	if err == nil {
+		t.Fatalf("Scan() = %+v, nil with the adapter blocked, want an error", found)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("Scan() error = %v, want the adapter's loss reported, not ErrNotFound", err)
+	}
+	if !errors.Is(err, ErrRetryable) {
+		t.Errorf("Scan() error = %v, want ErrRetryable", err)
+	}
+	if took >= scanWindow {
+		t.Errorf("Scan() took %v, want an error before the %v window ends", took, scanWindow)
+	}
+}
+
+// TestScanConnectedNotZeroRSSI holds a link to the test controller with
+// bluetoothctl and checks that a scan lists it as connected. BlueZ reports no
+// RSSI for a connected device, so the library would show a false 0 dBm. It
+// connects to the controller, which the controller allows once at a time:
+// close the Go Power! Connect app and stop any go-pwr that owns it first.
+func TestScanConnectedNotZeroRSSI(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+
+	t.Cleanup(func() { sh(t, "bluetoothctl disconnect "+mac) })
+	if out := sh(t, "bluetoothctl --timeout 30 connect "+mac); !strings.Contains(out, "Connection successful") {
+		t.Fatalf("bluetoothctl connect %s: %s", mac, out)
+	}
+
+	found, err := adapter.Scan(context.Background(), "")
+	t.Logf("Scan() with a link held = %+v, %v", found, err)
+	if err != nil {
+		t.Fatalf("Scan() error = %v, want the connected controller", err)
+	}
+	for _, c := range found {
+		if !strings.EqualFold(c.Address, mac) {
+			continue
+		}
+		if !c.Connected {
+			t.Errorf("%s listed as not connected (RSSI %d dBm) while a link is held", c.Address, c.RSSI)
+		}
+		if c.RSSI != 0 {
+			t.Errorf("%s connected but carries RSSI %d dBm, want it cleared", c.Address, c.RSSI)
+		}
+		return
+	}
+	t.Errorf("Scan() = %+v, want it to include the connected %s", found, mac)
+}

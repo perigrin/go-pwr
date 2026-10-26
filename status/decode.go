@@ -73,9 +73,29 @@ func Decode(reply string) (Reading, error) {
 	return r, nil
 }
 
+// maxFieldDigits is the width of the reply's numeric fields. A longer
+// value isn't one the controller sent in that field.
+const maxFieldDigits = 5
+
+// parseField decodes a decimal field: an optional sign followed by one to
+// maxFieldDigits ASCII digits.
+func parseField(s string) (int, error) {
+	digits := strings.TrimLeft(s, "+-")
+	if len(s)-len(digits) > 1 {
+		return 0, fmt.Errorf("%q has more than one sign", s)
+	}
+	if len(digits) == 0 || len(digits) > maxFieldDigits {
+		return 0, fmt.Errorf("%q is not 1 to %d digits", s, maxFieldDigits)
+	}
+	return strconv.Atoi(s)
+}
+
 // gatingField decodes fields[index] and checks it lies within [min, max].
 func gatingField(reply string, fields []string, name string, index, min, max int) (int, error) {
-	v, err := strconv.Atoi(fields[index])
+	if index >= len(fields) {
+		return 0, fmt.Errorf("decode %s (field %d) in reply %q: reply has only %d fields", name, index, reply, len(fields))
+	}
+	v, err := parseField(fields[index])
 	if err != nil {
 		return 0, fmt.Errorf("decode %s (field %d) in reply %q: %w", name, index, reply, err)
 	}

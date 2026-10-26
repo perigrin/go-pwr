@@ -300,3 +300,161 @@ func TestTimeBudget(t *testing.T) {
 			status.TotalTimeout, (worst.total() + status.TotalTimeout).Round(time.Millisecond))
 	}
 }
+
+func TestConnectAbsentDeviceErrors(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+	absent := otherMac(t, mac)
+	ensureLinkDownOnCleanup(t, mac)
+	scanFor(t, adapter, mac)
+	baseline := goroutineBaseline()
+
+	const deadline = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	started := time.Now()
+	conn, err := adapter.Connect(ctx, absent)
+	took := time.Since(started)
+	t.Logf("Connect(%s) = %v after %v", absent, err, took.Round(time.Millisecond))
+
+	if conn != nil {
+		conn.Close()
+		t.Fatalf("Connect() to absent %s made a link", absent)
+	}
+	if err == nil || !errors.Is(err, ErrRetryable) {
+		t.Errorf("Connect() error = %v, want an ErrRetryable error", err)
+	}
+	if took >= deadline {
+		t.Errorf("Connect() took %v, want an error before the %v deadline", took, deadline)
+	}
+	if linkUp(t, adapter, absent) || linkUp(t, adapter, mac) {
+		t.Error("a link is up after the failed connect, want none")
+	}
+	if got := settledGoroutines(baseline); got > baseline {
+		t.Errorf("%d goroutines after the failed connect, want %d or fewer", got, baseline)
+	}
+}
+
+func TestConnectExpiredContext(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+	ensureLinkDownOnCleanup(t, mac)
+	scanFor(t, adapter, mac)
+	baseline := goroutineBaseline()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	started := time.Now()
+	conn, err := adapter.Connect(ctx, mac)
+	took := time.Since(started)
+	t.Logf("Connect(%s) with an expired context = %v after %v", mac, err, took.Round(time.Microsecond))
+
+	if conn != nil {
+		conn.Close()
+		t.Fatal("Connect() made a link with an expired context")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrRetryable) {
+		t.Errorf("Connect() error = %v, want DeadlineExceeded and ErrRetryable", err)
+	}
+	if took > 50*time.Millisecond {
+		t.Errorf("Connect() took %v, want it to return at once", took)
+	}
+	// A connect that had started would show as a link within seconds.
+	time.Sleep(lateLinkWait)
+	if linkUp(t, adapter, mac) {
+		t.Error("a link came up after Connect returned, want no connect started")
+	}
+	if got := settledGoroutines(baseline); got > baseline {
+		t.Errorf("%d goroutines after the expired connect, want %d or fewer", got, baseline)
+	}
+}
+
+func TestConnectDeadlineRace(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+	ensureLinkDownOnCleanup(t, mac)
+
+	// Connects take 1.2 to 9.8 s on lola (protocol.md, "Time budget on
+	// lola"), so deadlines from 0.4 to 6 s straddle most of them.
+	for deadline := 400 * time.Millisecond; deadline <= 6*time.Second; deadline += 400 * time.Millisecond {
+		scanFor(t, adapter, mac)
+		baseline := goroutineBaseline()
+
+		ctx, cancel := context.WithTimeout(context.Background(), deadline)
+		conn, err := adapter.Connect(ctx, mac)
+		cancel()
+		switch {
+		case err == nil:
+			t.Logf("deadline %v: connect won", deadline)
+			if err := conn.Close(); err != nil {
+				t.Errorf("deadline %v: Close() error = %v", deadline, err)
+			}
+		case errors.Is(err, context.DeadlineExceeded) && errors.Is(err, ErrRetryable):
+			t.Logf("deadline %v: deadline won", deadline)
+		default:
+			t.Logf("deadline %v: connect failed on its own: %v", deadline, err)
+		}
+		if !waitLinkDown(t, adapter, mac, 3*time.Second) {
+			t.Errorf("deadline %v: link up after Connect and Close, want it down", deadline)
+		}
+		if got := settledGoroutines(baseline); got > baseline {
+			t.Errorf("deadline %v: %d goroutines left, want %d or fewer", deadline, got, baseline)
+		}
+	}
+}
+
+func TestCloseTwice(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+	ensureLinkDownOnCleanup(t, mac)
+	scanFor(t, adapter, mac)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	conn, err := adapter.Connect(ctx, mac)
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("first Close() error = %v", err)
+	}
+	started := time.Now()
+	if err := conn.Close(); err != nil {
+		t.Errorf("second Close() error = %v, want nil", err)
+	}
+	if took := time.Since(started); took > 50*time.Millisecond {
+		t.Errorf("second Close() took %v, want it to return at once", took)
+	}
+	if linkUp(t, adapter, mac) {
+		t.Error("link up after Close, want it down")
+	}
+}
+
+func TestCloseAfterRemoteDrop(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+	ensureLinkDownOnCleanup(t, mac)
+	scanFor(t, adapter, mac)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	conn, err := adapter.Connect(ctx, mac)
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	sh(t, "bluetoothctl disconnect "+mac)
+	if !waitLinkDown(t, adapter, mac, 5*time.Second) {
+		t.Fatal("bluetoothctl disconnect left the link up")
+	}
+
+	started := time.Now()
+	err = conn.Close()
+	took := time.Since(started)
+	t.Logf("Close() after a remote drop = %v after %v (bound %v)", err, took.Round(time.Millisecond), closeBound)
+	if err != nil {
+		t.Errorf("Close() error = %v, want nil for a link already down", err)
+	}
+	if took > closeBound/5 {
+		t.Errorf("Close() took %v, want it prompt, well under its %v bound", took, closeBound)
+	}
+}

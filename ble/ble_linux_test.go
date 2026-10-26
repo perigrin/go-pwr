@@ -192,3 +192,31 @@ func TestOpenAccessDenied(t *testing.T) {
 		t.Errorf("child run as nobody did not pass")
 	}
 }
+
+// unbindAdapter removes hci0 by unbinding lola's Bluetooth UART driver, and
+// waits for BlueZ to drop the adapter.
+func unbindAdapter(t *testing.T) {
+	t.Helper()
+	sh(t, "echo serial0-0 | tee /sys/bus/serial/drivers/hci_uart_bcm/unbind")
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat("/sys/class/bluetooth/hci0"); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("hci0 still present 15s after unbinding it")
+}
+
+func TestOpenNoAdapter(t *testing.T) {
+	requireRoot(t)
+	restoreOnCleanup(t)
+	unbindAdapter(t)
+
+	_, err := Open()
+	var dbusErr dbus.Error
+	t.Logf("Open() error = %v (D-Bus error: %v, %#v)", err, errors.As(err, &dbusErr), dbusErr)
+	if !errors.Is(err, ErrNoAdapter) || !errors.Is(err, ErrFatalAtStartup) {
+		t.Errorf("Open() error = %v, want ErrNoAdapter and ErrFatalAtStartup", err)
+	}
+}

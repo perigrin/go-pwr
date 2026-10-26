@@ -362,3 +362,39 @@ func TestDecodeOutOfTableCodes(t *testing.T) {
 		wantOnlyNull(t, alteredReply(t, i, "-01"), i)
 	}
 }
+
+// TestDecodeFramedLolaReply decodes a real reply as it arrives from the
+// controller: a leading space, the 166-byte body, then CRLF.
+func TestDecodeFramedLolaReply(t *testing.T) {
+	reply := lolaReply(t, 1)
+	if len(reply) != 169 || reply[0] != ' ' || !strings.HasSuffix(reply, "\r\n") {
+		t.Fatalf("reply-01 is not 169 bytes framed with a space and CRLF: %q", reply)
+	}
+	r, err := Decode(reply)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if r.BatteryMV != 13187 {
+		t.Errorf("BatteryMV = %d, want 13187", r.BatteryMV)
+	}
+	if r.ChargeMA != 0 {
+		t.Errorf("ChargeMA = %d, want 0", r.ChargeMA)
+	}
+	if r.Raw != reply {
+		t.Errorf("Raw = %q, want all 169 bytes %q", r.Raw, reply)
+	}
+	if len(r.FieldErrors) != 0 {
+		t.Errorf("FieldErrors = %v, want none", r.FieldErrors)
+	}
+	if r.TempC == nil || r.TempF == nil {
+		t.Errorf("temperatures not decoded: TempC=%v TempF=%v", r.TempC, r.TempF)
+	}
+}
+
+// TestFormatFramedLolaReply formats a real framed reply as the text block.
+func TestFormatFramedLolaReply(t *testing.T) {
+	got := testRecord(t, lolaReply(t, 1)).Text()
+	if !strings.Contains(got, "battery          13.19 V") {
+		t.Errorf("Text() =\n%s\nwant a 13.19 V battery line", got)
+	}
+}

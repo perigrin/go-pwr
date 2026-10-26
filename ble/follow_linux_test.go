@@ -6,9 +6,14 @@ package ble
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/perigrin/go-pwr/status"
 )
 
 // followReadBound is the context deadline of a reading in these tests, the
@@ -145,6 +150,192 @@ func TestFollowNoSpliceAfterCutOffReading(t *testing.T) {
 	requireWholeReading(t, reply)
 	if f.conn == held {
 		t.Error("the read after a cut-off reading used the connection the cut-off reply was arriving on")
+	}
+	for _, err := range drops.all() {
+		t.Errorf("notification dropped: %v", err)
+	}
+}
+
+// bluetoothctlSession is a running bluetoothctl that takes commands on its
+// standard input, so that a disconnect can be issued within milliseconds of
+// the request being written. Starting bluetoothctl for each disconnect takes
+// longer than a reply does.
+type bluetoothctlSession struct {
+	t     *testing.T
+	stdin io.WriteCloser
+	cmd   *exec.Cmd
+}
+
+// startBluetoothctl starts the session, ends it when the test ends, and
+// waits for it to be ready.
+func startBluetoothctl(t *testing.T) *bluetoothctlSession {
+	t.Helper()
+	cmd := exec.Command("bluetoothctl")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("bluetoothctl stdin: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start bluetoothctl: %v", err)
+	}
+	t.Cleanup(func() {
+		io.WriteString(stdin, "quit\n")
+		stdin.Close()
+		done := make(chan struct{})
+		go func() { cmd.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			cmd.Process.Kill()
+			<-done
+		}
+	})
+	time.Sleep(time.Second)
+	return &bluetoothctlSession{t: t, stdin: stdin, cmd: cmd}
+}
+
+// disconnect tells bluetoothctl to drop the link to mac, as
+// `bluetoothctl disconnect` does.
+func (b *bluetoothctlSession) disconnect(mac string) {
+	if _, err := io.WriteString(b.stdin, "disconnect "+mac+"\n"); err != nil {
+		b.t.Errorf("tell bluetoothctl to disconnect: %v", err)
+	}
+}
+
+// promptly is how soon a drop must be reported: well under the 20 s timeout
+// of the reading, with room for BlueZ to tell and for the link to be closed.
+const promptly = 3 * time.Second
+
+// TestFollowDropMidReply drops the link while the reply is arriving. A
+// held connection answers within about 200 ms of the write, but BlueZ takes
+// 2.1 to 2.3 s to drop the link after bluetoothctl disconnect (measured on
+// lola, four drops). So the test tells bluetoothctl to disconnect a lead
+// before it reads, and looks for the lead that lands the drop between the
+// write and the end of the reply: a lead that is too long drops the link
+// before the write, and one that is too short lets the reply complete.
+func TestFollowDropMidReply(t *testing.T) {
+	requireHardware(t)
+	f, mac := newFollower(t)
+	ctl := startBluetoothctl(t)
+
+	requireWholeReading(t, readWhole(t, f))
+	lead, step := 1800*time.Millisecond, 100*time.Millisecond
+	const attempts = 14
+	for attempt := 1; attempt <= attempts; attempt++ {
+		written := false
+		f.conn.afterWrite = func() { written = true }
+		ctl.disconnect(mac)
+		time.Sleep(lead)
+		reply, took, err := followRead(f)
+		if f.conn != nil {
+			f.conn.afterWrite = nil
+		}
+		switch {
+		case err == nil:
+			t.Logf("attempt %d, lead %v: reply completed before the drop (%d bytes)", attempt, lead, len(reply))
+			lead += step
+			if !waitLinkDown(t, f.adapter, mac, 10*time.Second) {
+				t.Fatal("bluetoothctl disconnect left the link up")
+			}
+			if _, _, err := followRead(f); !errors.Is(err, ErrLinkDropped) {
+				t.Fatalf("reading after the late drop: error = %v, want ErrLinkDropped", err)
+			}
+			readWhole(t, f)
+		case !written:
+			t.Logf("attempt %d, lead %v: link dropped before the write: %v", attempt, lead, err)
+			if !errors.Is(err, ErrLinkDropped) {
+				t.Fatalf("error = %v, want ErrLinkDropped", err)
+			}
+			if lead > step {
+				lead -= step
+			}
+			step = max(step/2, 10*time.Millisecond)
+			readWhole(t, f)
+		default:
+			t.Logf("attempt %d, lead %v: dropped mid-reply: %v after %v", attempt, lead, err, took.Round(time.Millisecond))
+			var replyErr *status.ReplyError
+			if errors.As(err, &replyErr) {
+				t.Errorf("error = %v carries a reply error (%v), want a dropped link and not an incomplete reply", err, replyErr)
+			}
+			if !errors.Is(err, ErrLinkDropped) {
+				t.Fatalf("error = %v, want ErrLinkDropped", err)
+			}
+			if took > promptly {
+				t.Errorf("drop reported after %v, want under %v", took, promptly)
+			}
+			requireWholeReading(t, readWhole(t, f))
+			return
+		}
+	}
+	t.Fatalf("the link was not dropped mid-reply in %d attempts", attempts)
+}
+
+// TestFollowDropReportedPromptly drops the link after the checks that precede
+// the write, so the request meets a dead link and no reply can come. A
+// Follower that waited for the reply would report that after the whole
+// timeout, as an incomplete reply or none; this one reports the drop as soon
+// as BlueZ does.
+func TestFollowDropReportedPromptly(t *testing.T) {
+	requireHardware(t)
+	f, mac := newFollower(t)
+
+	requireWholeReading(t, readWhole(t, f))
+
+	var downAt time.Time
+	f.conn.beforeWrite = func() {
+		sh(t, "bluetoothctl disconnect "+mac)
+		waitLinkDown(t, f.adapter, mac, 10*time.Second)
+		downAt = time.Now()
+	}
+	reply, _, err := followRead(f)
+	reported := time.Since(downAt)
+	t.Logf("reading = %q, %v, reported %v after the link went down (timeout %v)", reply, err, reported.Round(time.Millisecond), followReadBound)
+	if downAt.IsZero() {
+		t.Fatal("the link was never dropped: the request did not reach its write")
+	}
+	if !errors.Is(err, ErrLinkDropped) {
+		t.Fatalf("error = %v, want ErrLinkDropped", err)
+	}
+	if reported > promptly {
+		t.Errorf("drop reported %v after the link went down, want under %v and far under the %v timeout", reported, promptly, followReadBound)
+	}
+	requireWholeReading(t, readWhole(t, f))
+}
+
+// TestFollowRepeatedDrops drops the link five times in a row. Every drop must
+// resubscribe cleanly: no error about a subscription that already exists, and
+// the same number of notifications delivered for each reply, as a
+// subscription made twice would deliver more.
+func TestFollowRepeatedDrops(t *testing.T) {
+	requireHardware(t)
+	f, mac := newFollower(t)
+	drops := &dropRecorder{}
+	var delivered []*atomic.Int32
+	f.configure = func(c *Conn) {
+		count := new(atomic.Int32)
+		delivered = append(delivered, count)
+		c.onDrop = drops.record
+		c.onNotified = func() { count.Add(1) }
+	}
+
+	const drops5 = 5
+	perReply := make([]int32, 0, drops5+1)
+	for i := 0; i <= drops5; i++ {
+		if i > 0 {
+			dropLink(t, f, mac)
+			_, _, err := followRead(f)
+			if !errors.Is(err, ErrLinkDropped) {
+				t.Fatalf("drop %d: reading after it: error = %v, want ErrLinkDropped", i, err)
+			}
+		}
+		requireWholeReading(t, readWhole(t, f))
+		perReply = append(perReply, delivered[len(delivered)-1].Load())
+	}
+	t.Logf("%d connections, notifications delivered for each first reply: %v", len(delivered), perReply)
+	for i, n := range perReply {
+		if n != perReply[0] {
+			t.Errorf("reply %d took %d notifications, want %d as for the first", i, n, perReply[0])
+		}
 	}
 	for _, err := range drops.all() {
 		t.Errorf("notification dropped: %v", err)

@@ -42,11 +42,13 @@ type Conn struct {
 	// onDrop, when set, hears of each notification that was not used, in
 	// place of the log. beforeWrite, when set, runs after the checks and
 	// before the closing check that precedes the write; afterWrite, when set,
-	// runs right after the write returns. Tests set them before the first
-	// request.
+	// runs right after the write returns; onNotified, when set, runs on each
+	// notification the status link takes, to count them. Tests set them
+	// before the first request.
 	onDrop      func(error)
 	beforeWrite func()
 	afterWrite  func()
+	onNotified  func()
 }
 
 // devicePath is the object path BlueZ gives the device with the address mac.

@@ -59,7 +59,7 @@ func (f *Follower) Read(ctx context.Context) (string, error) {
 	} else if up, err := connected(ctx, f.conn.object); err != nil && !isGone(err) {
 		return "", f.abandoned(fmt.Errorf("check the link: %w", err))
 	} else if err != nil || !up {
-		return "", f.dropped(nil)
+		return "", f.dropped()
 	}
 
 	watched, cancel := context.WithCancelCause(ctx)
@@ -76,7 +76,7 @@ func (f *Follower) Read(ctx context.Context) (string, error) {
 		return reply, nil
 	}
 	if down || f.linkDown() {
-		return "", f.dropped(err)
+		return "", f.dropped()
 	}
 	return "", f.abandoned(err)
 }
@@ -138,15 +138,13 @@ func (f *Follower) abandoned(cause error) error {
 }
 
 // dropped closes the connection whose link went down and returns the error
-// for it, joined with the close's own error if that failed. cause is the
-// failure that showed it, if any.
-func (f *Follower) dropped(cause error) error {
+// for it, joined with the close's own error if that failed. The failure that
+// showed the drop, such as a reply cut short by it, is left out: it is only
+// the drop's effect, and an incomplete reply is what the error must not say.
+func (f *Follower) dropped() error {
 	conn := f.conn
 	f.conn = nil
 	err := fmt.Errorf("follow read: the link to %s dropped", f.mac)
-	if cause != nil {
-		err = fmt.Errorf("%w: %w", err, cause)
-	}
 	if closeErr := conn.Close(); closeErr != nil {
 		err = errors.Join(err, closeErr)
 	}

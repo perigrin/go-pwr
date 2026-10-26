@@ -23,9 +23,10 @@ type Follower struct {
 	adapter *Adapter
 	mac     string
 
-	// mu serialises Read and Close, and guards conn.
-	mu   sync.Mutex
-	conn *Conn
+	// mu serialises Read and Close, and guards conn and closed.
+	mu     sync.Mutex
+	conn   *Conn
+	closed bool
 
 	// configure, when set, runs on each Conn the Follower makes, before its
 	// first request. Tests set it before the first Read.
@@ -46,10 +47,15 @@ func (a *Adapter) Follow(mac string) *Follower {
 // watches it while the reply arrives. A link seen down gives an error that
 // matches ErrLinkDropped, as soon as it is seen, and not after the reading's
 // timeout as an incomplete reply. The dropped connection is closed, so the
-// next Read connects again. Every error matches ErrRetryable.
+// next Read connects again. Every error other than ErrNotConnected matches
+// ErrRetryable. A Read after Close returns an error that matches
+// ErrNotConnected, and makes no connection.
 func (f *Follower) Read(ctx context.Context) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.closed {
+		return "", fmt.Errorf("follow read: %w: the follower is closed", ErrNotConnected)
+	}
 	if f.conn == nil {
 		conn, err := f.establish(ctx)
 		if err != nil {
@@ -151,10 +157,14 @@ func (f *Follower) dropped() error {
 	return retryableError(classify(nil, ErrLinkDropped, "", err))
 }
 
-// Close ends the held connection, if there is one.
+// Close ends the held connection, if there is one, and ends the Follower: no
+// later Read makes another. A second Close returns nil. Close can't interrupt
+// a Read in flight; it waits for it, so cancel the Read's context first to end
+// it sooner.
 func (f *Follower) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.closed = true
 	if f.conn == nil {
 		return nil
 	}

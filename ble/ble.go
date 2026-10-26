@@ -118,11 +118,19 @@
 // A Follower prevents a splice by reconnecting after any failed or cut-off
 // reading: a tail of an earlier reply can exist only on a held connection, so
 // a reading that fails, or that its context cuts off, closes the connection
-// and the next Read makes a new one, with a status link and a notification
-// subscription of its own, which nothing of the old reply can reach. It does
-// not drain the old reply up to the D-Bus sequence boundary instead, because
-// reconnecting is simpler and stronger, and costs one scan and connect per
-// failed reading.
+// and the next Read makes a new one, with a D-Bus connection, status link and
+// notification subscription of its own. Notifications of the old reply go to
+// the old D-Bus connection, and the new one bounds its read at the write's
+// reply sequence number, so a late notification cannot be taken for the new
+// reply. That holds even when BlueZ would not drop the old link and Connect
+// reuses it, which is why the guarantee rests on the new D-Bus connection and
+// not on the link being new. A Follower does not drain the old reply up to
+// the D-Bus sequence boundary instead, because reconnecting is simpler and
+// stronger, and costs one scan and connect per failed reading.
+//
+// Close ends a Follower: a Read after it returns ErrNotConnected and makes no
+// connection. Close can't interrupt a Read in flight; it waits for it, so
+// cancel the Read's context first to end it sooner.
 //
 // BlueZ announces a drop from the other end only through the Connected
 // property of the device. Read reads it before it uses a held connection, and

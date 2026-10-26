@@ -101,12 +101,13 @@ func (a *Adapter) connect(ctx context.Context, object dbus.BusObject) error {
 
 // abandoned drops a connect that ctx cut short, whichever way BlueZ was
 // getting on with it, and returns the error for it: the context's error,
-// joined with the cleanup's own error if BlueZ would not disconnect. The
-// cleanup runs on a context of its own, since ctx is done.
+// joined with the cleanup's own error, marked ErrCleanupFailed, if BlueZ
+// would not disconnect: the link may still be up. The cleanup runs on a
+// context of its own, since ctx is done.
 func (a *Adapter) abandoned(object dbus.BusObject, mac string, ctxErr error) error {
 	err := fmt.Errorf("connect %s: %w", mac, ctxErr)
 	if cleanup := disconnect(object); cleanup != nil {
-		err = errors.Join(err, fmt.Errorf("abandon connect: %w", cleanup))
+		err = errors.Join(err, fmt.Errorf("abandon connect: %w: %w", ErrCleanupFailed, cleanup))
 	}
 	return retryableError(err)
 }

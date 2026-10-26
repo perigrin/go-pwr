@@ -95,6 +95,11 @@ func TestFailedSaysNothingWhenASignalEndedTheReading(t *testing.T) {
 		{"timeout", expired, fmt.Errorf("scan: %w", context.DeadlineExceeded), 1},
 		{"other error after a signal", signalled, errors.New("write the request: broken"), 1},
 		{"no signal", context.Background(), fmt.Errorf("scan: %w", context.Canceled), 1},
+		// BlueZ didn't drop the link of an abandoned connect: the link may
+		// still be up, so a signal doesn't make that quiet.
+		{"signal and a link that stayed up", signalled, errors.Join(
+			fmt.Errorf("connect: %w", context.Canceled),
+			fmt.Errorf("abandon connect: %w: link still up", ble.ErrCleanupFailed)), 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr bytes.Buffer

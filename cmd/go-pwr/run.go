@@ -54,9 +54,9 @@ func oneShot(ctx context.Context, cfg config, stdout, stderr io.Writer) (code in
 			code = 1
 		}
 	}()
-	adapter, err := ble.Open()
+	adapter, err := ble.OpenContext(ctx)
 	if err != nil {
-		printError(stderr, err)
+		failed(ctx, stderr, err)
 		return 1
 	}
 	ctx, cancel := context.WithTimeout(ctx, cfg.timeout)
@@ -172,12 +172,13 @@ func closeConn(conn *ble.Conn, stderr io.Writer) {
 }
 
 // failed writes the error of a failed reading to stderr, unless a signal
-// ended the reading: the person who sent SIGINT or SIGTERM knows, and a
-// supervisor stopping the service shouldn't find an error in its journal. A
-// deadline passing is still an error. An error that is more than the
-// cancellation is kept.
+// ended the reading and the error is nothing but the cancellation: the person
+// who sent SIGINT or SIGTERM knows, and a supervisor stopping the service
+// shouldn't find an error in its journal. A deadline passing is still an
+// error, and so is a cancellation that left something behind, such as a link
+// BlueZ didn't drop (ble.ErrCleanupFailed).
 func failed(ctx context.Context, stderr io.Writer, err error) {
-	if errors.Is(ctx.Err(), context.Canceled) && errors.Is(err, context.Canceled) {
+	if errors.Is(ctx.Err(), context.Canceled) && errors.Is(err, context.Canceled) && !errors.Is(err, ble.ErrCleanupFailed) {
 		return
 	}
 	printError(stderr, err)

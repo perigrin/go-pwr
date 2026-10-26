@@ -239,6 +239,11 @@ type Controller struct {
 // it.
 var ErrNotFound = errors.New("controller not found")
 
+// ErrCleanupFailed is returned, joined to the error that ended an abandoned
+// connect, when BlueZ did not drop the link as asked within closeBound: the
+// link may still be up. It is never returned alone.
+var ErrCleanupFailed = errors.New("link may still be up")
+
 // ErrNotConnected is returned, wrapped, by RequestStatus on a Conn that was
 // never connected, or whose Close has been called. Nothing was written.
 var ErrNotConnected = errors.New("not connected")

@@ -201,20 +201,6 @@ func uptimeGaps(readings []polled) []float64 {
 	return gaps
 }
 
-// failedReadings counts the stderr lines that are a reading failing: error
-// lines that don't quote a reply. An error line that quotes the reply, for a
-// field that didn't decode, and a warning line, are on a reading that was
-// printed. A signal that ends a reading draws no line at all.
-func failedReadings(stderr string) int {
-	n := 0
-	for _, line := range strings.Split(strings.TrimSuffix(stderr, "\n"), "\n") {
-		if strings.HasPrefix(line, "error: ") && !strings.Contains(line, ` reply "`) {
-			n++
-		}
-	}
-	return n
-}
-
 // wantStartToStart checks that readings made with --poll=interval start every
 // interval, start to start. A reading arrives some 3 to 8 s after it starts,
 // so one gap varies by several seconds either side of the interval, but the

@@ -390,3 +390,21 @@ func TestOneShotStdoutOnlyReadings(t *testing.T) {
 		t.Errorf("failed run: status %d, stdout %q, stderr %q, want 1, nothing, an error on stderr", failed.status, failed.stdout, failed.stderr)
 	}
 }
+
+// A signal that lands while the adapter is being opened is quiet, like one
+// in the scan: the open's error is a bare cancellation. This needs the
+// system bus but no controller.
+func TestOneShotSignalDuringOpenIsQuiet(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ble.OpenContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenContext on a cancelled context = %v, want an error matching context.Canceled", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := oneShot(ctx, config{format: "json", mac: "C3:00:00:58:51:40", timeout: time.Minute}, &stdout, &stderr)
+	if code != 1 || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Errorf("code %d, stdout %q, stderr %q, want 1 and nothing at all", code, stdout.String(), stderr.String())
+	}
+}

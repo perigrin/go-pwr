@@ -87,6 +87,14 @@
 // connect and discovery times is in docs/reference/protocol.md, "Time budget
 // on lola".
 //
+// # Opening again
+//
+// An Adapter keeps the D-Bus object it was opened with, so it can't recover
+// from BlueZ or the system bus restarting. A loop of readings, such as
+// --poll, opens a new one with OpenContext after each failed reading, which
+// reconnects a closed system bus, and bounds that and every property read by
+// the reading's context.
+//
 // The bluetooth library hard-codes the adapter name hci0. If an adapter
 // reset brought the adapter back as hci1, every retry would fail until the
 // program restarts. That is unlikely, because Linux reuses the lowest free

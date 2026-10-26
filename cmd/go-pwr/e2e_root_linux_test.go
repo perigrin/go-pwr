@@ -110,8 +110,11 @@ const (
 	reloadBusCmd = "dbus-send --system --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig"
 )
 
-func TestOneShotStartupAccessDeniedExit1(t *testing.T) {
-	mac := requireRoot(t)
+// runAsNobody runs the cross-built go-pwr as the user nobody, who the deny
+// drop-in locks out of BlueZ. The drop-in, and the copy of the binary that
+// nobody can read, are removed when the test ends.
+func runAsNobody(t *testing.T, args ...string) result {
+	t.Helper()
 	t.Cleanup(func() {
 		sh(t, "rm -f "+denyDropIn+"; "+reloadBusCmd+"; rm -rf "+nobodyDir)
 	})
@@ -139,10 +142,20 @@ func TestOneShotStartupAccessDeniedExit1(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("runuser", "-u", "nobody", "--", "env", "HOME=/tmp", child, "--mac", mac)
+	cmd := exec.Command("runuser", append([]string{"-u", "nobody", "--", "env", "HOME=/tmp", child}, args...)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err = cmd.Run()
+	done := make(chan error, 1)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err = <-done:
+	case <-time.After(60 * time.Second):
+		cmd.Process.Kill()
+		t.Fatalf("go-pwr as nobody still running after 60 s\nstdout:\n%sstderr:\n%s", &stdout, &stderr)
+	}
 	var exit *exec.ExitError
 	status := 0
 	switch {
@@ -152,7 +165,13 @@ func TestOneShotStartupAccessDeniedExit1(t *testing.T) {
 		t.Fatalf("running go-pwr as nobody: %v", err)
 	}
 	t.Logf("go-pwr as nobody: status %d\nstdout:\n%sstderr:\n%s", status, &stdout, &stderr)
-	wantStartupError(t, result{status, stdout.String(), stderr.String()}, "access to BlueZ denied")
+	return result{status, stdout.String(), stderr.String()}
+}
+
+func TestOneShotStartupAccessDeniedExit1(t *testing.T) {
+	mac := requireRoot(t)
+	r := runAsNobody(t, "--mac", mac)
+	wantStartupError(t, r, "access to BlueZ denied")
 }
 
 func TestOneShotStartupErrorsExit1(t *testing.T) {

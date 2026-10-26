@@ -3,7 +3,10 @@
 
 package status
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // A complete reply needs no timer: its CRLF marks it whole (see Assembler).
 // The timing below only decides when to give up on a reply that is cut off
@@ -29,3 +32,66 @@ const (
 	// complete. Measured longest: 202 ms (x10 = 2.02 s).
 	TotalTimeout = 3 * time.Second
 )
+
+// Why a read gives up. Each is wrapped in a *ReplyError that carries the
+// bytes received so far, so the error line quotes them.
+var (
+	// ErrNoReply: nothing arrived within FirstNotificationTimeout of the
+	// request, or within the read's limit.
+	ErrNoReply = errors.New("no reply to the request")
+	// ErrIncompleteReply: a reply started but did not complete in time.
+	ErrIncompleteReply = errors.New("incomplete reply")
+)
+
+// Completion decides when one read gives up. It holds no clock: the caller
+// passes the time of the request, of each notification, and of each check,
+// so it can be driven by real time or by a captured timestamp. It is not
+// safe for concurrent use.
+type Completion struct {
+	request time.Time
+	limit   time.Time // no deadline is later than this; zero means none
+	lastAt  time.Time // when the latest notification arrived; zero if none
+}
+
+// NewCompletion starts the timing for a read whose request was written at
+// request. limit, if not zero, is the end of the read's budget (from
+// --timeout): the read never waits past it.
+func NewCompletion(request, limit time.Time) *Completion {
+	return &Completion{request: request, limit: limit}
+}
+
+// Notified records that a notification arrived at at.
+func (c *Completion) Notified(at time.Time) {
+	c.lastAt = at
+}
+
+// Deadline returns when the read gives up unless another notification
+// arrives first: FirstNotificationTimeout after the request while nothing
+// has arrived, then GapTimeout after the latest notification, and never
+// TotalTimeout after the request or past the limit.
+func (c *Completion) Deadline() time.Time {
+	d := c.request.Add(FirstNotificationTimeout)
+	if !c.lastAt.IsZero() {
+		d = c.lastAt.Add(GapTimeout)
+		if total := c.request.Add(TotalTimeout); total.Before(d) {
+			d = total
+		}
+	}
+	if !c.limit.IsZero() && c.limit.Before(d) {
+		d = c.limit
+	}
+	return d
+}
+
+// Check returns nil while the read may keep waiting at now. At or after the
+// Deadline it returns a *ReplyError carrying reply, the bytes that arrived:
+// ErrNoReply if there are none, ErrIncompleteReply if there are some.
+func (c *Completion) Check(now time.Time, reply string) error {
+	if now.Before(c.Deadline()) {
+		return nil
+	}
+	if reply == "" {
+		return &ReplyError{Err: ErrNoReply}
+	}
+	return &ReplyError{Reply: reply, Err: ErrIncompleteReply}
+}

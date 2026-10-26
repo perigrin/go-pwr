@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -112,4 +113,135 @@ func TestCompletionTimingRequiresCaptures(t *testing.T) {
 	}
 }
 
-var _ = errors.New
+// replay feeds the real sequence n to an Assembler and a Completion in
+// order, stamping each notification with its captured time after
+// the request. Before each one it checks the Completion has not given up.
+// It returns the assembler's reply so far and the Completion.
+func replay(t *testing.T, n, drop int) (*Completion, string) {
+	t.Helper()
+	stamps, err := readStamps(fmt.Sprintf("%s/session-1-reply-%02d.seq.txt", lolaTimingDir, n))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := lolaSequence(t, n)
+	request := time.Date(2026, 10, 25, 22, 8, 0, 0, time.UTC)
+	c := NewCompletion(request, time.Time{})
+	a := NewAssembler()
+	tok := a.Begin(0)
+	var reply string
+	for i := range chunks[:len(chunks)-drop] {
+		at := request.Add(stamps[i])
+		if err := c.Check(at, reply); err != nil {
+			t.Fatalf("reply-%02d gave up before notification %d: %v", n, i+1, err)
+		}
+		var err error
+		if reply, _, err = a.Add(tok, uint64(i+1), chunks[i]); err != nil {
+			t.Fatal(err)
+		}
+		c.Notified(at)
+	}
+	return c, reply
+}
+
+// TestCompletionNeverGivesUpOnCapturedReplies replays all 21 real replies
+// with their real timestamps: none is abandoned along the way.
+func TestCompletionNeverGivesUpOnCapturedReplies(t *testing.T) {
+	files, err := filepath.Glob(lolaTimingDir + "/*.seq.txt")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no captured sequences (err %v)", err)
+	}
+	for n := 1; n <= len(files); n++ {
+		replay(t, n, 0)
+	}
+}
+
+func TestCompletionCutOffSequenceGivesUp(t *testing.T) {
+	c, reply := replay(t, 1, 1)
+	if reply == "" || strings.HasSuffix(reply, "\r\n") {
+		t.Fatalf("setup: reply %q should be a non-empty cut-off", reply)
+	}
+	last := c.lastAt
+	if err := c.Check(last.Add(GapTimeout-time.Millisecond), reply); err != nil {
+		t.Fatalf("gave up before the gap timeout: %v", err)
+	}
+	err := c.Check(last.Add(GapTimeout), reply)
+	if !errors.Is(err, ErrIncompleteReply) {
+		t.Fatalf("Check at the gap timeout = %v, want ErrIncompleteReply", err)
+	}
+	line := ErrorLine(err)
+	if !strings.Contains(line, strconv.Quote(reply)) {
+		t.Errorf("error line %q does not quote what arrived, %q", line, reply)
+	}
+	if _, werr := Decode(reply); werr == nil {
+		t.Error("a cut-off reply decoded: it must never be reported as a reading")
+	}
+}
+
+func TestCompletionNoNotifications(t *testing.T) {
+	request := time.Date(2026, 10, 25, 22, 8, 0, 0, time.UTC)
+	c := NewCompletion(request, time.Time{})
+	if err := c.Check(request.Add(FirstNotificationTimeout-time.Millisecond), ""); err != nil {
+		t.Fatalf("gave up before the first-notification timeout: %v", err)
+	}
+	err := c.Check(request.Add(FirstNotificationTimeout), "")
+	if !errors.Is(err, ErrNoReply) {
+		t.Fatalf("Check at the timeout = %v, want ErrNoReply", err)
+	}
+	if line := ErrorLine(err); !strings.Contains(line, "no reply received") {
+		t.Errorf("error line %q does not say no reply was received", line)
+	}
+}
+
+// TestCompletionLimitCapsDeadline: a --timeout budget that ends sooner than
+// the timing wins.
+func TestCompletionLimitCapsDeadline(t *testing.T) {
+	request := time.Date(2026, 10, 25, 22, 8, 0, 0, time.UTC)
+	limit := request.Add(500 * time.Millisecond)
+	c := NewCompletion(request, limit)
+	if got := c.Deadline(); !got.Equal(limit) {
+		t.Errorf("Deadline = %v, want the limit %v", got, limit)
+	}
+	if err := c.Check(limit, ""); !errors.Is(err, ErrNoReply) {
+		t.Errorf("Check at the limit = %v, want ErrNoReply", err)
+	}
+}
+
+// defaultTimeout is the default --timeout in cmd/go-pwr/flags.go.
+const defaultTimeout = 20 * time.Second
+
+var (
+	scanSeen    = regexp.MustCompile(`seen (\d+(?:\.\d+)?) s into a scan`)
+	connectDisc = regexp.MustCompile(`services resolved: (\d+(?:\.\d+)?) s with discovery`)
+)
+
+// seconds returns the first group of re's match in text as a duration.
+func seconds(t *testing.T, text string, re *regexp.Regexp) time.Duration {
+	t.Helper()
+	m := re.FindStringSubmatch(text)
+	if m == nil {
+		t.Fatalf("protocol.md has no match for %v", re)
+	}
+	f, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return time.Duration(f * float64(time.Second))
+}
+
+// TestCompletionFitsTimeoutBudget reads the scan and connect times of the
+// lola timing capture's first look from protocol.md (the 01a17532-5787
+// capture) and checks scan + connect + the longest wait after the request
+// stays inside the default --timeout.
+func TestCompletionFitsTimeoutBudget(t *testing.T) {
+	b, err := os.ReadFile("../docs/reference/protocol.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	scan := seconds(t, text, scanSeen)
+	connect := seconds(t, text, connectDisc)
+	worst := max(FirstNotificationTimeout, TotalTimeout)
+	if total := scan + connect + worst; total >= defaultTimeout {
+		t.Errorf("scan %v + connect %v + give-up %v = %v, want under the default timeout %v", scan, connect, worst, total, defaultTimeout)
+	}
+}

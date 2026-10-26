@@ -261,7 +261,10 @@ type readResult struct {
 // chunk's sequence number. It returns the final add's result.
 func readThrough(t *testing.T, handler sequentialHandler, b *readBuffer, results <-chan readResult, boundary uint64, chunks [][]byte, seqs []uint64) readResult {
 	t.Helper()
-	b.begin(boundary)
+	b.begin()
+	if _, _, err := b.bound(dbus.Sequence(boundary)); err != nil {
+		t.Fatal(err)
+	}
 	for i, chunk := range chunks {
 		handler.DeliverSignal("org.freedesktop.DBus.Properties", "PropertiesChanged", valueSignal(fff1Path, seqs[i], chunk))
 	}
@@ -295,7 +298,7 @@ func consumerToBuffer(ch <-chan *dbus.Signal, b *readBuffer) <-chan readResult {
 func TestOrderedDeliveryAssemblesRealReplies(t *testing.T) {
 	handler, ch := signalChannel()
 	defer handler.Terminate()
-	b := newReadBuffer()
+	b := newReadBuffer(nil)
 	results := consumerToBuffer(ch, b)
 
 	seq := uint64(10)
@@ -325,7 +328,7 @@ func TestOrderedDeliveryAssemblesRealReplies(t *testing.T) {
 func TestOrderedDeliveryRefusesReorderedSequence(t *testing.T) {
 	handler, ch := signalChannel()
 	defer handler.Terminate()
-	b := newReadBuffer()
+	b := newReadBuffer(nil)
 	results := consumerToBuffer(ch, b)
 
 	chunks := lolaChunks(t, 1)

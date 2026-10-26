@@ -38,6 +38,22 @@
 // seen); and an adapter that is on the bus with Powered false is
 // ErrAdapterUnavailable. Open never powers on or unblocks the adapter.
 //
+// # Connecting
+//
+// Connect makes its link with a D-Bus call that ctx can cancel, not the
+// library's Connect, which waits for the link with no way to stop it. When
+// ctx ends, Connect tells BlueZ to disconnect, which also cancels a connect
+// still in progress, waits for the link to be down and returns the context's
+// error. Close does the same, waiting up to 5 s for BlueZ to report the link
+// down.
+//
+// Service discovery is not watched. The library's DiscoverServices polls
+// ServicesResolved every 10 ms for at most 10 s and can't be cancelled, but
+// BlueZ resolves the services during the connect, so on lola the poll ends
+// within about a second (0.3 to 1 s over 40 runs). The breakdown of scan,
+// connect and discovery times is in docs/reference/protocol.md, "Time budget
+// on lola".
+//
 // The bluetooth library hard-codes the adapter name hci0. If an adapter
 // reset brought the adapter back as hci1, every retry would fail until the
 // program restarts. That is unlikely, because Linux reuses the lowest free

@@ -6,11 +6,15 @@ package ble
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/perigrin/go-pwr/status"
+	"tinygo.org/x/bluetooth"
 )
 
 // linkUp reports BlueZ's own view of whether this machine holds a link to
@@ -170,5 +174,129 @@ func TestConnectWithLeftoverLink(t *testing.T) {
 	}
 	if linkUp(t, adapter, mac) {
 		t.Error("link still up after Close, want it down")
+	}
+}
+
+// budget is the --timeout the readings must fit in.
+const budget = 20 * time.Second
+
+// replyTime is the longest request-to-last-notification time in the 21
+// replies of the lola timing capture (protocol.md, "Notification sizes and
+// timing on lola").
+const replyTime = 202 * time.Millisecond
+
+// budgetRuns is how many runs TestTimeBudget makes with an address, and how
+// many without.
+const budgetRuns = 10
+
+// budgetRun is the timing of one scan, connect, discovery and close.
+type budgetRun struct {
+	scan, connect, discovery, closing time.Duration
+}
+
+// total is what a reading spends before it can ask for status.
+func (r budgetRun) total() time.Duration {
+	return r.scan + r.connect + r.discovery
+}
+
+// timeRun makes one scan, connect, service discovery and close against the
+// controller. It sends nothing to the controller: discovery only reads what
+// BlueZ already resolved. A connect that fails is returned, since the
+// controller sometimes refuses one (a failed reading, retried on the next
+// poll); a failed scan or discovery stops the test.
+func timeRun(t *testing.T, adapter *Adapter, mac string, scanMac string) (run budgetRun, connectErr error) {
+	t.Helper()
+
+	started := time.Now()
+	found, err := adapter.Scan(context.Background(), scanMac)
+	run.scan = time.Since(started)
+	if err != nil {
+		t.Fatalf("Scan(%q) error = %v after %v", scanMac, err, run.scan)
+	}
+	heard := false
+	for _, c := range found {
+		heard = heard || strings.EqualFold(c.Address, mac)
+	}
+	if !heard {
+		t.Fatalf("Scan(%q) = %+v, want it to include %s", scanMac, found, mac)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	started = time.Now()
+	conn, err := adapter.Connect(ctx, mac)
+	run.connect = time.Since(started)
+	if err != nil {
+		return run, fmt.Errorf("after %v: %w", run.connect.Round(time.Millisecond), err)
+	}
+	defer func() {
+		started := time.Now()
+		if err := conn.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+		run.closing = time.Since(started)
+	}()
+
+	// The library's own discovery wait is what a later status request needs
+	// to get past, so time it as the library runs it.
+	parsed, err := bluetooth.ParseMAC(mac)
+	if err != nil {
+		t.Fatalf("ParseMAC(%s): %v", mac, err)
+	}
+	started = time.Now()
+	device, err := adapter.library.Connect(bluetooth.Address{MACAddress: bluetooth.MACAddress{MAC: parsed}}, bluetooth.ConnectionParams{})
+	if err == nil {
+		_, err = device.DiscoverServices(nil)
+	}
+	run.discovery = time.Since(started)
+	if err != nil {
+		t.Fatalf("discover services error = %v after %v", err, run.discovery)
+	}
+	return run, nil
+}
+
+// TestTimeBudget records how long the steps before a status request take on
+// lola, and checks that they and the longest reply wait fit in --timeout.
+func TestTimeBudget(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+	ensureLinkDownOnCleanup(t, mac)
+	// Forget the device so the first run discovers services with a cold
+	// cache, as the first connection after a restart would; the scan finds it
+	// again. The later runs have a warm cache.
+	sh(t, "bluetoothctl remove "+mac+"; true")
+	failures := 0
+
+	for _, group := range []struct{ name, scanMac string }{
+		{"with an address", mac},
+		{"without an address", ""},
+	} {
+		var worst budgetRun
+		for i := 0; i < budgetRuns; {
+			run, err := timeRun(t, adapter, mac, group.scanMac)
+			if err != nil {
+				t.Logf("%s: connect failed, run repeated: %v", group.name, err)
+				failures++
+				if failures > budgetRuns {
+					t.Fatalf("%d connects failed, want a controller that connects", failures)
+				}
+				time.Sleep(time.Second)
+				continue
+			}
+			t.Logf("%s, run %2d: scan %v, connect %v, discovery %v, close %v, total %v",
+				group.name, i, run.scan.Round(time.Millisecond), run.connect.Round(time.Millisecond),
+				run.discovery.Round(time.Millisecond), run.closing.Round(time.Millisecond), run.total().Round(time.Millisecond))
+			if run.total() > worst.total() {
+				worst = run
+			}
+			if run.total()+replyTime >= budget {
+				t.Errorf("%s, run %d: %v and a %v reply do not fit in %v", group.name, i, run.total(), replyTime, budget)
+			}
+			i++
+			time.Sleep(time.Second)
+		}
+		t.Logf("%s: slowest scan+connect+discovery %v, plus the %v longest reply = %v of %v; with the %v reply limit it would be %v",
+			group.name, worst.total().Round(time.Millisecond), replyTime, (worst.total() + replyTime).Round(time.Millisecond), budget,
+			status.TotalTimeout, (worst.total() + status.TotalTimeout).Round(time.Millisecond))
 	}
 }

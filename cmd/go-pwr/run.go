@@ -83,33 +83,33 @@ func readOnce(ctx context.Context, cfg config, adapter *ble.Adapter, out recordW
 	// cost a reply that was already received.
 	bootID, err := boot.ID()
 	if err != nil {
-		printError(stderr, err)
+		failed(ctx, stderr, err)
 		return false
 	}
 	found, err := adapter.Scan(ctx, cfg.mac)
 	if err != nil {
-		printError(stderr, err)
+		failed(ctx, stderr, err)
 		return false
 	}
 	controller, err := selectController(found)
 	if err != nil {
-		printError(stderr, err)
+		failed(ctx, stderr, err)
 		return false
 	}
 	conn, err := connect(ctx, adapter, controller.Address)
 	if err != nil {
-		printError(stderr, err)
+		failed(ctx, stderr, err)
 		return false
 	}
 	defer closeConn(conn, stderr)
 	reply, err := conn.RequestStatus(ctx)
 	if err != nil {
-		printError(stderr, err)
+		failed(ctx, stderr, err)
 		return false
 	}
 	rx, err := receive(reply, controller.Address, bootID, boot.Uptime)
 	if err != nil {
-		printError(stderr, err)
+		failed(ctx, stderr, err)
 		return false
 	}
 	return reportTo(out, rx, stderr) == 0
@@ -169,6 +169,30 @@ func closeConn(conn *ble.Conn, stderr io.Writer) {
 	if err := conn.Close(); err != nil {
 		printError(stderr, fmt.Errorf("close: %w", err))
 	}
+}
+
+// failed writes the error of a failed reading to stderr, unless a signal
+// ended the reading: the person who sent SIGINT or SIGTERM knows, and a
+// supervisor stopping the service shouldn't find an error in its journal. A
+// deadline passing is still an error. An error that is more than the
+// cancellation is kept.
+func failed(ctx context.Context, stderr io.Writer, err error) {
+	if errors.Is(ctx.Err(), context.Canceled) && errors.Is(err, context.Canceled) {
+		return
+	}
+	printError(stderr, err)
+}
+
+// protect runs one step of a reading and reports a panic in it as a failed
+// step, so a loop of readings goes on.
+func protect(stderr io.Writer, step func() bool) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			printPanic(stderr, "", r)
+			ok = false
+		}
+	}()
+	return step()
 }
 
 // printPanic writes a recovered panic to stderr as one error line, escaped

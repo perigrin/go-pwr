@@ -91,9 +91,18 @@
 //
 // An Adapter keeps the D-Bus object it was opened with, so it can't recover
 // from BlueZ or the system bus restarting. A loop of readings, such as
-// --poll, opens a new one with OpenContext after each failed reading, which
-// reconnects a closed system bus, and bounds that and every property read by
-// the reading's context.
+// --poll, opens a new one with ReopenContext after each failed reading, which
+// reconnects a closed system bus. Its errors match ErrRetryable, where
+// OpenContext's match ErrFatalAtStartup.
+//
+// The reading's context bounds the calls this package makes itself: the
+// power-state read in OpenContext and ReopenContext, the same read after a
+// failed scan, the Connected reads, the connect and the request. It does not
+// bound the calls inside the bluetooth library: Enable's property read, and
+// the property read, discovery filter and object listing that a scan makes.
+// Those return when BlueZ answers or fails, so a BlueZ that never answers
+// could hold one. The poll tests on lola, with BlueZ masked and stopped or its
+// adapter gone, saw none outlast a reading's --timeout.
 //
 // The bluetooth library hard-codes the adapter name hci0. If an adapter
 // reset brought the adapter back as hci1, every retry would fail until the

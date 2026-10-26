@@ -44,8 +44,10 @@ func pollLoop(ctx context.Context, interval time.Duration, reading func(context.
 // The adapter is opened again after every failed reading. ble.Adapter keeps
 // its D-Bus object from the first connection, which can't recover from BlueZ
 // or the bus restarting, and a fresh one costs a property read. A reading's
-// --timeout covers opening the adapter too, so a BlueZ that is slow to
-// answer can't hold up the loop for longer than a reading may take.
+// --timeout covers the power-state read in opening the adapter, so a masked
+// BlueZ, which takes about 15 s to fail it, can't hold up the loop for longer
+// than a reading may take. The library's own calls, such as Enable and the
+// ones a scan makes, are not bounded by it.
 func pollMode(ctx context.Context, cfg config, stdout, stderr io.Writer) int {
 	startup, cancel := context.WithTimeout(ctx, cfg.timeout)
 	adapter, err := ble.OpenContext(startup)
@@ -62,8 +64,16 @@ func pollMode(ctx context.Context, cfg config, stdout, stderr io.Writer) int {
 		ctx, cancel := context.WithTimeout(ctx, cfg.timeout)
 		defer cancel()
 		if adapter == nil {
-			if adapter, err = ble.OpenContext(ctx); err != nil {
-				printError(stderr, err)
+			// A failed open is an ordinary failed reading, not a startup error.
+			if !protect(stderr, func() bool {
+				var err error
+				if adapter, err = ble.ReopenContext(ctx); err != nil {
+					failed(ctx, stderr, err)
+					return false
+				}
+				return true
+			}) {
+				adapter = nil
 				return
 			}
 		}

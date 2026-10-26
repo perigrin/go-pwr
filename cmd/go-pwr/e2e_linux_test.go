@@ -268,6 +268,9 @@ func TestOneShotInterruptedExit1(t *testing.T) {
 			if r.status != 1 || r.stdout != "" {
 				t.Errorf("status %d, stdout %q, want 1 and nothing", r.status, r.stdout)
 			}
+			if r.stderr != "" {
+				t.Errorf("stderr %q, want nothing: a signal is not an error", r.stderr)
+			}
 			requireLinkDown(t, mac)
 		})
 	}
@@ -344,6 +347,9 @@ func TestOneShotSIGTERMExit1(t *testing.T) {
 			r, _ := interrupt(t, syscall.SIGTERM, delay, "--mac", mac)
 			if r.status != 1 || r.stdout != "" {
 				t.Errorf("status %d, stdout %q, want 1 and nothing", r.status, r.stdout)
+			}
+			if r.stderr != "" {
+				t.Errorf("stderr %q, want nothing: a signal is not an error", r.stderr)
 			}
 			requireLinkDown(t, mac)
 		})

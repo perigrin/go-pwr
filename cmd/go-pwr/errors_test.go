@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -74,5 +75,46 @@ func TestWaitToRetryReportsTheInterruption(t *testing.T) {
 	}
 	if err := waitToRetry(context.Background(), time.Millisecond); err != nil {
 		t.Errorf("waitToRetry = %v, want nil after the pause", err)
+	}
+}
+
+func TestFailedSaysNothingWhenASignalEndedTheReading(t *testing.T) {
+	signalled, stop := context.WithCancel(context.Background())
+	stop() // what SIGINT and SIGTERM do
+	expired, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-expired.Done()
+
+	for _, tc := range []struct {
+		name      string
+		ctx       context.Context
+		err       error
+		wantLines int
+	}{
+		{"signal", signalled, fmt.Errorf("scan: %w", context.Canceled), 0},
+		{"timeout", expired, fmt.Errorf("scan: %w", context.DeadlineExceeded), 1},
+		{"other error after a signal", signalled, errors.New("write the request: broken"), 1},
+		{"no signal", context.Background(), fmt.Errorf("scan: %w", context.Canceled), 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			failed(tc.ctx, &stderr, tc.err)
+			if got := strings.Count(stderr.String(), "\n"); got != tc.wantLines {
+				t.Errorf("stderr %q has %d lines, want %d", stderr.String(), got, tc.wantLines)
+			}
+		})
+	}
+}
+
+func TestProtectTurnsAPanicIntoAFailedStep(t *testing.T) {
+	var stderr bytes.Buffer
+	if protect(&stderr, func() bool { panic("boom\nforged") }) {
+		t.Error("protect returned true for a step that panicked")
+	}
+	if strings.Count(stderr.String(), "\n") != 1 || !strings.Contains(stderr.String(), "internal error") {
+		t.Errorf("stderr %q, want one escaped internal error line", stderr.String())
+	}
+	if !protect(&stderr, func() bool { return true }) {
+		t.Error("protect returned false for a step that succeeded")
 	}
 }

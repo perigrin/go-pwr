@@ -34,29 +34,41 @@ func Open() (*Adapter, error) {
 	return OpenContext(context.Background())
 }
 
-// OpenContext is Open, except that ctx ends the wait for BlueZ, whose
-// property read takes about 15 s to fail when BlueZ is masked. A loop of
-// readings opens the adapter again after a failed one, since an Adapter
-// can't recover from the system bus or BlueZ restarting, and bounds each
-// reading, this included, with ctx. A dbus-daemon restart is covered because
-// the system bus is connected again when its connection is closed.
+// OpenContext is Open, except that ctx ends the wait for BlueZ in the power
+// state read, which takes about 15 s to fail when BlueZ is masked. The
+// library's own calls in Enable are not bounded by ctx.
 func OpenContext(ctx context.Context) (*Adapter, error) {
+	return open(ctx, startupError)
+}
+
+// ReopenContext opens the adapter again, in the middle of a run, after a
+// failed reading: an Adapter keeps the D-Bus object it was opened with, so it
+// can't recover from BlueZ or the system bus restarting. It is OpenContext,
+// except that its errors match ErrRetryable, not ErrFatalAtStartup, because
+// at this point the program is past its startup and the failure is an
+// ordinary failed reading. A closed system bus is connected again.
+func ReopenContext(ctx context.Context) (*Adapter, error) {
+	return open(ctx, retryableError)
+}
+
+// open opens the adapter, and marks its errors with mark.
+func open(ctx context.Context, mark func(error) error) (*Adapter, error) {
 	conn, err := dbus.SystemBus()
 	if err != nil {
-		return nil, startupError(fmt.Errorf("connect to the system bus: %w", err))
+		return nil, mark(fmt.Errorf("connect to the system bus: %w", err))
 	}
 	object := conn.Object("org.bluez", dbus.ObjectPath("/org/bluez/"+adapterName))
 	if err := checkPowered(ctx, object); err != nil {
-		return nil, startupError(err)
+		return nil, mark(err)
 	}
 	library := bluetooth.NewAdapter(adapterName)
 	if err := library.Enable(); err != nil {
 		// The library reads the adapter itself and may drop the typed D-Bus
 		// error, so look again with our own read to classify what went wrong.
 		if again := checkPowered(ctx, object); again != nil {
-			return nil, startupError(again)
+			return nil, mark(again)
 		}
-		return nil, startupError(describe("enable adapter "+adapterName, err))
+		return nil, mark(describe("enable adapter "+adapterName, err))
 	}
 	return &Adapter{library: library, conn: conn, object: object}, nil
 }

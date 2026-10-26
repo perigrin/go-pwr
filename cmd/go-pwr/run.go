@@ -28,16 +28,20 @@ const connectAttempts = 3
 // connectPause is the wait between connect attempts.
 const connectPause = time.Second
 
-// run reads the controller and returns the exit status: 0 only if a reading
-// was printed, 1 otherwise. SIGINT and SIGTERM end a reading in progress,
-// and the link is closed on the way out.
+// run reads the controller and returns the exit status. A one-shot returns 0
+// only if a reading was printed, 1 otherwise. --poll reads until SIGINT or
+// SIGTERM, and returns 0 then, or 1 if it can't start. SIGINT and SIGTERM end
+// a reading in progress, and the link is closed on the way out.
 func run(cfg config, stdout, stderr io.Writer) int {
-	if cfg.poll > 0 || cfg.follow > 0 {
-		fmt.Fprintln(stderr, "go-pwr: --poll and --follow are not implemented")
+	if cfg.follow > 0 {
+		fmt.Fprintln(stderr, "go-pwr: --follow is not implemented")
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if cfg.poll > 0 {
+		return pollMode(ctx, cfg, stdout, stderr)
+	}
 	return oneShot(ctx, cfg, stdout, stderr)
 }
 
@@ -57,7 +61,7 @@ func oneShot(ctx context.Context, cfg config, stdout, stderr io.Writer) (code in
 	}
 	ctx, cancel := context.WithTimeout(ctx, cfg.timeout)
 	defer cancel()
-	if !readOnce(ctx, cfg, adapter, stdout, stderr) {
+	if !readOnce(ctx, cfg, adapter, newRecordWriter(cfg, stdout), stderr) {
 		return 1
 	}
 	return 0
@@ -68,7 +72,7 @@ func oneShot(ctx context.Context, cfg config, stdout, stderr io.Writer) (code in
 // reports every failure on stderr itself, and a panic in it counts as a
 // failed reading, so a loop of readings goes on. The link is closed on every
 // way out.
-func readOnce(ctx context.Context, cfg config, adapter *ble.Adapter, stdout, stderr io.Writer) (ok bool) {
+func readOnce(ctx context.Context, cfg config, adapter *ble.Adapter, out recordWriter, stderr io.Writer) (ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			printPanic(stderr, "", r)
@@ -108,7 +112,7 @@ func readOnce(ctx context.Context, cfg config, adapter *ble.Adapter, stdout, std
 		printError(stderr, err)
 		return false
 	}
-	return report(cfg, rx, stdout, stderr) == 0
+	return reportTo(out, rx, stderr) == 0
 }
 
 // receive stamps a reply that has just been received with the local time and
@@ -205,23 +209,43 @@ type receivedReply struct {
 	uptimeS float64
 }
 
-// report decodes a received reply, prints the reading on stdout in the
-// format cfg asks for and its diagnostics on stderr, and returns the exit
-// status: 0 if a reading was printed, 1 if not. Every stderr line about the
-// reply quotes it once.
+// recordWriter writes readings to stdout in one format. A text writer
+// remembers that it has written, so that it separates the readings of a
+// continuous mode with a blank line.
+type recordWriter interface {
+	Write(status.Record) error
+}
+
+// jsonWriter writes each reading as one JSON line.
+type jsonWriter struct{ w io.Writer }
+
+func (j jsonWriter) Write(rec status.Record) error { return status.WriteJSONLine(j.w, rec) }
+
+// newRecordWriter returns the writer for the format cfg asks for.
+func newRecordWriter(cfg config, stdout io.Writer) recordWriter {
+	if cfg.format == "json" {
+		return jsonWriter{stdout}
+	}
+	return status.NewTextWriter(stdout)
+}
+
+// report decodes a received reply and prints it, as reportTo does, for a
+// single reading.
 func report(cfg config, rx receivedReply, stdout, stderr io.Writer) int {
+	return reportTo(newRecordWriter(cfg, stdout), rx, stderr)
+}
+
+// reportTo decodes a received reply, prints the reading with out and its
+// diagnostics on stderr, and returns the exit status: 0 if a reading was
+// printed, 1 if not. Every stderr line about the reply quotes it once.
+func reportTo(out recordWriter, rx receivedReply, stderr io.Writer) int {
 	reading, err := status.Decode(rx.reply)
 	if err != nil {
 		printError(stderr, err)
 		return 1
 	}
 	rec := status.Record{Time: rx.at, BootID: rx.bootID, UptimeS: rx.uptimeS, Device: rx.device, Reading: reading}
-	if cfg.format == "json" {
-		err = status.WriteJSONLine(stdout, rec)
-	} else {
-		err = status.NewTextWriter(stdout).Write(rec)
-	}
-	if err != nil {
+	if err = out.Write(rec); err != nil {
 		printError(stderr, err)
 		return 1
 	}

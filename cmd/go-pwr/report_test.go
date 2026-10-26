@@ -156,3 +156,28 @@ func TestReportWarningGoesToStderr(t *testing.T) {
 		t.Errorf("stderr %q: want one warning line quoting the reply once", stderr.String())
 	}
 }
+
+func TestReportToSeparatesTextReadingsWithOneBlankLine(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	out := newRecordWriter(config{format: "text"}, &stdout)
+	for range 3 {
+		if code := reportTo(out, received(realReply(t)), &stderr); code != 0 {
+			t.Fatalf("code %d; stderr %q", code, stderr.String())
+		}
+	}
+	blocks := strings.Split(stdout.String(), "\n\n")
+	if len(blocks) != 3 || strings.HasPrefix(stdout.String(), "\n") || strings.HasSuffix(stdout.String(), "\n\n") {
+		t.Errorf("stdout %q, want three blocks with exactly one blank line between them", stdout.String())
+	}
+}
+
+func TestReportToWritesOneJSONLinePerReading(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	out := newRecordWriter(config{format: "json"}, &stdout)
+	for range 2 {
+		reportTo(out, received(realReply(t)), &stderr)
+	}
+	if strings.Count(stdout.String(), "\n") != 2 || strings.Contains(stdout.String(), "\n\n") {
+		t.Errorf("stdout %q, want two lines and no blank line", stdout.String())
+	}
+}

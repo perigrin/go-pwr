@@ -16,6 +16,11 @@ func Open() (*Adapter, error) {
 	return nil, ErrUnsupportedPlatform
 }
 
+// OpenContext returns ErrUnsupportedPlatform.
+func OpenContext(ctx context.Context) (*Adapter, error) {
+	return nil, ErrUnsupportedPlatform
+}
+
 // Scan returns ErrUnsupportedPlatform.
 func (a *Adapter) Scan(ctx context.Context, mac string) ([]Controller, error) {
 	return nil, ErrUnsupportedPlatform

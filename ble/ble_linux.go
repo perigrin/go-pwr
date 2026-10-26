@@ -31,19 +31,29 @@ type Adapter struct {
 // or unblocks the adapter. Its errors match ErrFatalAtStartup and one of the
 // error classes in the package documentation.
 func Open() (*Adapter, error) {
+	return OpenContext(context.Background())
+}
+
+// OpenContext is Open, except that ctx ends the wait for BlueZ, whose
+// property read takes about 15 s to fail when BlueZ is masked. A loop of
+// readings opens the adapter again after a failed one, since an Adapter
+// can't recover from the system bus or BlueZ restarting, and bounds each
+// reading, this included, with ctx. A dbus-daemon restart is covered because
+// the system bus is connected again when its connection is closed.
+func OpenContext(ctx context.Context) (*Adapter, error) {
 	conn, err := dbus.SystemBus()
 	if err != nil {
 		return nil, startupError(fmt.Errorf("connect to the system bus: %w", err))
 	}
 	object := conn.Object("org.bluez", dbus.ObjectPath("/org/bluez/"+adapterName))
-	if err := checkPowered(context.Background(), object); err != nil {
+	if err := checkPowered(ctx, object); err != nil {
 		return nil, startupError(err)
 	}
 	library := bluetooth.NewAdapter(adapterName)
 	if err := library.Enable(); err != nil {
 		// The library reads the adapter itself and may drop the typed D-Bus
 		// error, so look again with our own read to classify what went wrong.
-		if again := checkPowered(context.Background(), object); again != nil {
+		if again := checkPowered(ctx, object); again != nil {
 			return nil, startupError(again)
 		}
 		return nil, startupError(describe("enable adapter "+adapterName, err))
@@ -184,7 +194,7 @@ func (a *Adapter) Scan(ctx context.Context, mac string) ([]Controller, error) {
 		return nil, retryableError(fmt.Errorf("scan: %w", ctx.Err()))
 	}
 	if err != nil && (errors.Is(err, errScanPanicked) || (!matched && window.Err() == nil)) {
-		if checkErr := a.Check(); checkErr != nil {
+		if checkErr := a.checkContext(ctx); checkErr != nil {
 			return nil, checkErr
 		}
 		return nil, retryableError(fmt.Errorf("scan: %w", err))
@@ -192,7 +202,7 @@ func (a *Adapter) Scan(ctx context.Context, mac string) ([]Controller, error) {
 	if len(found) == 0 {
 		return nil, retryableError(fmt.Errorf("scan for %s: %w", describeTarget(mac), ErrNotFound))
 	}
-	a.markConnected(found)
+	a.markConnected(ctx, found)
 	return found, nil
 }
 
@@ -222,14 +232,14 @@ func describeTarget(mac string) string {
 // markConnected sets Connected on each controller this machine already holds
 // a link to. The library presents such a device with no signal strength, so
 // its RSSI would read 0 dBm.
-func (a *Adapter) markConnected(found []Controller) {
+func (a *Adapter) markConnected(ctx context.Context, found []Controller) {
 	for i := range found {
 		path := devicePath(a, found[i].Address)
-		connected, err := a.conn.Object("org.bluez", path).GetProperty("org.bluez.Device1.Connected")
+		on, err := connected(ctx, a.conn.Object("org.bluez", path))
 		if err != nil {
 			continue
 		}
-		if on, _ := connected.Value().(bool); on {
+		if on {
 			found[i].Connected = true
 			found[i].RSSI = 0
 		}

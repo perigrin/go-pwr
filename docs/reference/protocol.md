@@ -32,6 +32,21 @@ A `0000ffe1-…` service is also present. The app doesn't use it for this contro
 - **What has been observed to work:** in one test, a plain connection with no bond, notifications on `FFF1` only, and an immediate request returned a full reply.
 - The controller appears to allow **one connection at a time**. While the phone app was connected, other connection attempts failed. That was observed once.
 
+## BlueZ errors observed on lola
+
+Measured on lola (Raspberry Pi Zero W, BlueZ, Open reading `org.bluez.Adapter1.Powered` on `/org/bluez/hci0` over the system bus). The `ble` package tells these apart by D-Bus error name with `errors.As`, never by message text.
+
+| Condition | D-Bus error name | Notes |
+|---|---|---|
+| hci0 unbound from `hci_uart_bcm` `serial0-0` (no adapter, or the adapter vanished) | `org.freedesktop.DBus.Error.UnknownObject` | The message says `Method "Get" ... doesn't exist`. |
+| BlueZ stopped by `systemctl mask --runtime bluetooth.service` then `stop` | `org.freedesktop.DBus.Error.FileExists` | The message says `Unit dbus-org.bluez.service failed to load properly ... File exists`. It arrives about 15 seconds after the call, not at once. It is not `ServiceUnknown`: BlueZ is D-Bus activated through the `dbus-org.bluez.service` alias, so a plain `stop` is undone by the next call, and masking the real unit makes the activation fail with this name. `ServiceUnknown` and `NameHasNoOwner` are classified as not running too, but were not seen. |
+| `nobody` under a bus policy that denies `send_destination="org.bluez"` | `org.freedesktop.DBus.Error.AccessDenied` | The message starts `Rejected send message, 3 matched rules`. |
+| Adapter powered off (`bluetoothctl power off`) or soft-blocked (`rfkill block bluetooth`) | none | The adapter stays on the bus with `Powered` false. Powered off and blocked look the same to `Open`. |
+
+If the system bus itself can't be reached (tested with `DBUS_SYSTEM_BUS_ADDRESS` pointing at a missing socket), the dial error is not classified: nothing observed says what it means for BlueZ. The error is still fatal at startup.
+
+The bluetooth library hard-codes `hci0`. If an adapter reset brought the adapter back as `hci1`, retries would fail until the program restarts. That is unlikely, because Linux reuses the lowest free index; unbinding and rebinding the driver on lola brought it back as `hci0`.
+
 ## Status request
 
 1. Enable notifications on `FFF1`.
@@ -121,6 +136,22 @@ Only three fields can fail a reading on their values: charge current (index 0), 
 
 A sign of either kind, an empty field, embedded spaces, hexadecimal or non-ASCII digits, or more than five digits fail the reading.
 
+### °C/°F check
+
+When both temperature fields (indices 16 and 17) decode, the reported °F must lie within **2.6 °F** of 9/5 × reported °C + 32. A larger gap adds a warning to the reading, and the reading is still returned unchanged. The check is skipped when either field is null.
+
+The controller reports each temperature as a whole number, and which way it rounds or truncates is not known. The tolerance comes from sweeping every true temperature from −40 to +60 °C in 0.01 °C steps, with °C and °F each independently half-up, half-even, half-away, truncated toward zero or floored. The worst gap over the whole sweep is 2.6 °F, so the tolerance is exactly that:
+
+| Gap | Case |
+|---|---|
+| 2.6 °F | True −38.99 °C (−38.18 °F). °C truncated toward zero gives −38 (expected −36.4 °F) and °F floored gives −39. This is the worst mix: °C truncated toward zero and °F floored, which err in opposite directions below zero. Any rounding mode at all stays within 2.6 °F: each whole-degree report is off by less than 1 °C (1.8 °F) and 1 °F respectively, and the errors can add, so the gap is under 2.8 °F, and in fifths of a degree it is a whole number. |
+| 2.0 °F | True −0.99 °C (30.2 °F). °C truncated to `0` (expected 32 °F) and °F truncated to `30`. The worst case at freezing. |
+| 1.4 °F | The worst gap when both fields are rounded, in any of the three rounding modes. |
+| 0.4 °F | The real capture: `+22` °C and `+72` °F against an expected 71.6 °F. |
+
+5 × °F − (9 × °C + 160) is always a whole number, so the code compares it as an integer against 13 (2.6 × 5) with no float rounding. "At the tolerance" means a gap of exactly 2.6 °F, which some °C values can reach (22 °C with 69 °F, 3 °C with 40 °F); that gives no warning, and any larger gap does.
+
+**The check only warns for now.** It has not been confirmed against the cold and hot captures, which are still to be taken (decision 0001). Making it fail readings is a separate, later change.
 ## Notification sizes and timing on lola
 
 Measured on 2026-10-25 at 22:08–22:10 EDT on lola (Raspberry Pi Zero W, BCM43438, BlueZ 5.82, kernel 6.18), about 2 m from the controller (RSSI −68 dBm), at night: battery 13.18–13.19 V, PV 0.65 V, no charge current. The trace is `status/testdata/lola-timing/session-1.btsnoop`, its `btmon -r` decoding is beside it, and each reply's notifications are in `session-1-reply-NN.seq.txt` (line 1 names the trace; every other line is microseconds since the request write, then the payload in hex). 21 replies: four fresh connections of two replies each, then one held connection of 13. BlueZ's GATT cache was cleared first (`bluetoothctl remove`), so the first connection includes service discovery. Confidence: **observed** on this one night, one adapter and one controller.

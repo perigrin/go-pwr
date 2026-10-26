@@ -84,3 +84,13 @@ func TestFollowStartupErrorsExit1(t *testing.T) {
 		})
 	}
 }
+
+func TestFollowStartupAccessDeniedExit1(t *testing.T) {
+	mac := requireRoot(t)
+	started := time.Now()
+	r := runAsNobody(t, "--mac", mac, "--follow=10s", "--format", "json")
+	wantStartupError(t, r, "access to BlueZ denied")
+	if took := time.Since(started); took > 10*time.Second {
+		t.Errorf("took %v, want a prompt exit instead of retrying", took)
+	}
+}

@@ -8,9 +8,11 @@ package boot
 import (
 	"math"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func readProcUptime(t *testing.T) float64 {
@@ -53,5 +55,65 @@ func TestUptimeMatchesProcUptime(t *testing.T) {
 	}
 	if math.IsNaN(got) {
 		t.Errorf("Uptime() is NaN")
+	}
+}
+
+// setWallClock steps lola's wall clock to the given Unix second with date -s.
+func setWallClock(t *testing.T, unixSeconds int64) {
+	t.Helper()
+	out, err := exec.Command("date", "-s", "@"+strconv.FormatInt(unixSeconds, 10)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("date -s: %v: %s", err, out)
+	}
+}
+
+// TestUptimeIgnoresWallClockStep needs root. It stops systemd-timesyncd,
+// steps the wall clock an hour forward and back, and always restarts
+// timesyncd with NTP on, so the clock is left as it was.
+func TestUptimeIgnoresWallClockStep(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Fatal("needs root: run with sudo -n")
+	}
+	t.Cleanup(func() {
+		exec.Command("systemctl", "start", "systemd-timesyncd").Run()
+		exec.Command("timedatectl", "set-ntp", "true").Run()
+	})
+	if out, err := exec.Command("systemctl", "stop", "systemd-timesyncd").CombinedOutput(); err != nil {
+		t.Fatalf("stop systemd-timesyncd: %v: %s", err, out)
+	}
+	idBefore, err := ID()
+	if err != nil {
+		t.Fatalf("ID: %v", err)
+	}
+	upBefore, err := Uptime()
+	if err != nil {
+		t.Fatalf("Uptime: %v", err)
+	}
+	start := time.Now()
+
+	setWallClock(t, time.Now().Unix()+3600)
+	upForward, err := Uptime()
+	if err != nil {
+		t.Fatalf("Uptime: %v", err)
+	}
+	setWallClock(t, time.Now().Unix()-3600)
+	upBack, err := Uptime()
+	if err != nil {
+		t.Fatalf("Uptime: %v", err)
+	}
+	elapsed := time.Since(start).Seconds() // monotonic, unaffected by the steps
+
+	if upForward < upBefore || upForward-upBefore > elapsed+1 {
+		t.Errorf("uptime jumped with the forward step: %.3f -> %.3f over %.3f s", upBefore, upForward, elapsed)
+	}
+	if upBack < upForward || upBack-upBefore > elapsed+1 {
+		t.Errorf("uptime jumped with the backward step: %.3f -> %.3f over %.3f s", upForward, upBack, elapsed)
+	}
+	idAfter, err := ID()
+	if err != nil {
+		t.Fatalf("ID: %v", err)
+	}
+	if idAfter != idBefore {
+		t.Errorf("boot id changed across a wall-clock step: %q -> %q", idBefore, idAfter)
 	}
 }

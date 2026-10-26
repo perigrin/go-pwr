@@ -108,6 +108,38 @@
 // reset brought the adapter back as hci1, every retry would fail until the
 // program restarts. That is unlikely, because Linux reuses the lowest free
 // index.
+//
+// # Holding a connection
+//
+// A Follower, from Adapter.Follow, holds one connection across readings, for
+// --follow, where Connect and Close serve one reading. Its Read connects when
+// it has no link, and otherwise reads on the held one.
+//
+// A Follower prevents a splice by reconnecting after any failed or cut-off
+// reading: a tail of an earlier reply can exist only on a held connection, so
+// a reading that fails, or that its context cuts off, closes the connection
+// and the next Read makes a new one, with a D-Bus connection, status link and
+// notification subscription of its own. Notifications of the old reply go to
+// the old D-Bus connection, and the new one bounds its read at the write's
+// reply sequence number, so a late notification cannot be taken for the new
+// reply. That holds even when BlueZ would not drop the old link and Connect
+// reuses it, which is why the guarantee rests on the new D-Bus connection and
+// not on the link being new. A Follower does not drain the old reply up to
+// the D-Bus sequence boundary instead, because reconnecting is simpler and
+// stronger, and costs one scan and connect per failed reading.
+//
+// Close ends a Follower: a Read after it returns ErrNotConnected and makes no
+// connection. Close can't interrupt a Read in flight; it waits for it, so
+// cancel the Read's context first to end it sooner.
+//
+// BlueZ announces a drop from the other end only through the Connected
+// property of the device. Read reads it before it uses a held connection, and
+// watches it while the reply arrives, so a drop ends the reading at once with
+// an error that matches ErrLinkDropped, not an incomplete reply after the
+// whole timeout. The dead connection is closed, which ends its subscription
+// with its D-Bus connection, and the next Read subscribes afresh, so no
+// subscription is ever made twice on a characteristic and the notifications
+// per reply do not grow.
 package ble
 
 import (
@@ -247,6 +279,11 @@ var ErrCleanupFailed = errors.New("link may still be up")
 // ErrNotConnected is returned, wrapped, by RequestStatus on a Conn that was
 // never connected, or whose Close has been called. Nothing was written.
 var ErrNotConnected = errors.New("not connected")
+
+// ErrLinkDropped is returned, wrapped, by a Follower's Read when the link to
+// the controller went down while it was held, so the reading did not fail for
+// want of a reply. The next Read connects again.
+var ErrLinkDropped = errors.New("link to the controller dropped")
 
 // ErrUnsupportedPlatform is returned by every operation on an operating
 // system where the Bluetooth layer has no implementation.

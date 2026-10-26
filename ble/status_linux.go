@@ -95,6 +95,9 @@ type statusLink struct {
 	requestPath dbus.ObjectPath // FFF2
 	replyPath   dbus.ObjectPath // FFF1
 	buf         *readBuffer
+	// onNotified, when set, runs on each notification taken, before it is
+	// used.
+	onNotified func()
 	// notifyTried is set before notifications are asked for, so a teardown
 	// after a failed or abandoned subscribe turns them off again.
 	notifyTried bool
@@ -127,7 +130,7 @@ func (c *Conn) openLink(ctx context.Context) (*statusLink, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &statusLink{bus: bus, device: c.object.Path(), wake: make(chan struct{}, 1)}
+	l := &statusLink{bus: bus, device: c.object.Path(), wake: make(chan struct{}, 1), onNotified: c.onNotified}
 	drop := c.dropFunc()
 	l.buf = newReadBuffer(drop)
 	if err := l.open(ctx, drop); err != nil {
@@ -247,6 +250,9 @@ func getProperty(ctx context.Context, object dbus.BusObject, iface, name string)
 
 // notified takes one notification of FFF1 from the consumer, in order.
 func (l *statusLink) notified(key uint64, chunk []byte) {
+	if l.onNotified != nil {
+		l.onNotified()
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	reply, whole, err := l.buf.add(key, chunk)

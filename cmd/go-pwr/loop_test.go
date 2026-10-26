@@ -109,3 +109,32 @@ func TestPollLoopReadingSeesCancellation(t *testing.T) {
 		t.Fatalf("%d starts, %d ends, want 1 and 1: the reading must end when the context is cancelled", len(starts), len(ends))
 	}
 }
+
+// A loop that kept a schedule, next += interval, would start the readings it
+// missed back to back once a long one ended. This is the case that tells the
+// two apart: after one long reading, the loop waits a whole interval again.
+func TestPollLoopDoesNotMakeUpMissedIntervals(t *testing.T) {
+	const interval = 100 * time.Millisecond
+	var mu sync.Mutex
+	calls := 0
+	reading := func(ctx context.Context) {
+		mu.Lock()
+		calls++
+		first := calls == 1
+		mu.Unlock()
+		if first {
+			sleepFor(350 * time.Millisecond)(ctx)
+		} else {
+			sleepFor(10 * time.Millisecond)(ctx)
+		}
+	}
+	starts, _ := runLoop(t, interval, 700*time.Millisecond, reading)
+	if len(starts) < 4 {
+		t.Fatalf("%d readings, want at least 4", len(starts))
+	}
+	// The second reading started when the long one ended. The third is a
+	// whole interval later, not right behind it as a make-up would be.
+	if d := starts[2].Sub(starts[1]); d < interval-10*time.Millisecond || d > interval+60*time.Millisecond {
+		t.Errorf("third reading started %v after the second, want about %v: missed intervals were made up", d, interval)
+	}
+}

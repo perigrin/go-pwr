@@ -52,8 +52,9 @@ const requestName = "statusRequest"
 // Build constraints are ignored, so files for every platform are checked.
 // Test files are skipped because they are not part of the package.
 //
-// Blind spots, by design: a D-Bus method name built from pieces that are not
-// literals, a write through a helper that passes bytes along or through a
+// Blind spots, by design: a D-Bus method name split so that no single piece
+// contains WriteValue or AcquireWrite (for example "...Write" + "Value"), or
+// built at run time (fmt.Sprintf, variables), a write through a helper that passes bytes along or through a
 // function value, another package, a call made by reflection, and a
 // writeTarget literal made elsewhere in the package are not seen. Code review
 // covers them, with TestNoExportedByteWriter.

@@ -61,7 +61,12 @@ func oneShot(ctx context.Context, cfg config, stdout, stderr io.Writer) (code in
 		io.WriteString(stderr, status.ErrorLine(err))
 		return 1
 	}
-	conn, err := connect(ctx, adapter, found[0].Address)
+	controller, err := selectController(found)
+	if err != nil {
+		io.WriteString(stderr, status.ErrorLine(err))
+		return 1
+	}
+	conn, err := connect(ctx, adapter, controller.Address)
 	if err != nil {
 		io.WriteString(stderr, status.ErrorLine(err))
 		return 1
@@ -72,7 +77,7 @@ func oneShot(ctx context.Context, cfg config, stdout, stderr io.Writer) (code in
 		io.WriteString(stderr, status.ErrorLine(err))
 		return 1
 	}
-	rx := receivedReply{reply: reply, device: found[0].Address, at: time.Now()}
+	rx := receivedReply{reply: reply, device: controller.Address, at: time.Now()}
 	if rx.bootID, err = boot.ID(); err != nil {
 		io.WriteString(stderr, status.ErrorLine(err))
 		return 1

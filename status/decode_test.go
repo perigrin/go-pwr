@@ -81,8 +81,9 @@ func TestGatingBounds(t *testing.T) {
 	}
 }
 
-// wantGatingError checks that Decode fails reply, naming field and quoting
-// the reply.
+// wantGatingError checks that Decode fails reply with an error naming
+// field and carrying the reply, which ErrorLine quotes once. The error's
+// own message leaves the reply out.
 func wantGatingError(t *testing.T, reply, field string) {
 	t.Helper()
 	_, err := Decode(reply)
@@ -90,11 +91,16 @@ func wantGatingError(t *testing.T, reply, field string) {
 		t.Errorf("Decode(%q) succeeded, want an error naming %s", reply, field)
 		return
 	}
+	var re *ReplyError
+	if !errors.As(err, &re) || re.Reply != reply {
+		t.Errorf("error %q does not carry the reply %q", err, reply)
+	}
 	if !strings.Contains(err.Error(), field) {
 		t.Errorf("error %q does not name %s", err, field)
 	}
-	if !strings.Contains(err.Error(), strconv.Quote(reply)) {
-		t.Errorf("error %q does not quote the reply", err)
+	line := ErrorLine(err)
+	if n := strings.Count(line, strconv.Quote(reply)); n != 1 {
+		t.Errorf("line %q quotes the reply %d times, want once", line, n)
 	}
 }
 

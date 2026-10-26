@@ -188,14 +188,14 @@ func parseSigned(s string) (int, error) {
 // gatingField decodes fields[index] and checks it lies within [min, max].
 func gatingField(reply string, fields []string, name string, index, min, max int) (int, error) {
 	if index >= len(fields) {
-		return 0, fmt.Errorf("decode %s (field %d) in reply %q: reply has only %d fields", name, index, reply, len(fields))
+		return 0, &ReplyError{Reply: reply, Err: fmt.Errorf("decode %s (field %d): reply has only %d fields", name, index, len(fields))}
 	}
 	v, err := parseUnsigned(fields[index])
 	if err != nil {
-		return 0, fmt.Errorf("decode %s (field %d) in reply %q: %w", name, index, reply, err)
+		return 0, &ReplyError{Reply: reply, Err: fmt.Errorf("decode %s (field %d): %w", name, index, err)}
 	}
 	if v < min || v > max {
-		return 0, fmt.Errorf("decode %s (field %d) in reply %q: %d outside plausible range %d to %d", name, index, reply, v, min, max)
+		return 0, &ReplyError{Reply: reply, Err: fmt.Errorf("decode %s (field %d): %d outside plausible range %d to %d", name, index, v, min, max)}
 	}
 	return v, nil
 }

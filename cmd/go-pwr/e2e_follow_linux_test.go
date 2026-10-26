@@ -93,3 +93,50 @@ func TestFollowReconnectsAfterDrop(t *testing.T) {
 	}
 	requireLinkDown(t, mac)
 }
+
+func TestFollowSignalsExit0(t *testing.T) {
+	mac := requireHardware(t)
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
+		t.Run(sig.String(), func(t *testing.T) {
+			r := startGoPwr(t, "--mac", mac, "--follow=10s", "--format", "json")
+			if !r.waitFor(45*time.Second, func() bool { return r.readings() >= 1 }) {
+				t.Fatalf("no reading in 45 s; stderr %q", r.stderr)
+			}
+			time.Sleep(2 * time.Second)
+			if !linkUp(mac) {
+				t.Fatal("link is not up between readings, so there is nothing to disconnect")
+			}
+			signalled := time.Now()
+			got := r.stop(sig)
+			if got.status != 0 {
+				t.Errorf("status %d, want 0", got.status)
+			}
+			if took := time.Since(signalled); took > 10*time.Second {
+				t.Errorf("took %v to exit between readings, want a prompt exit", took)
+			}
+			wantOnlyJSONObjects(t, got.stdout)
+			if got.stderr != "" {
+				t.Errorf("stderr %q, want nothing: a signal is not an error", got.stderr)
+			}
+			requireLinkDown(t, mac)
+		})
+	}
+}
+
+func TestFollowSignalDuringFirstReading(t *testing.T) {
+	mac := requireHardware(t)
+	// The first reading scans and connects for seconds, so these land in the
+	// scan and in the connect.
+	for _, delay := range []time.Duration{500 * time.Millisecond, 2 * time.Second} {
+		t.Run(delay.String(), func(t *testing.T) {
+			r, _ := interrupt(t, syscall.SIGTERM, delay, "--mac", mac, "--follow=10s", "--format", "json")
+			if r.status != 0 {
+				t.Errorf("status %d, want 0", r.status)
+			}
+			if r.stderr != "" {
+				t.Errorf("stderr %q, want nothing: a signal is not an error", r.stderr)
+			}
+			requireLinkDown(t, mac)
+		})
+	}
+}

@@ -55,8 +55,10 @@ const controllerName = "GP-PWM-30-SB"
 
 // scanWindow is how long a scan runs when it does not stop at a match. The
 // controller advertises about once a second, and on lola the slowest of 20
-// scans took 7.1 s to hear it. So 8 s hears every controller in range with
-// 0.9 s to spare. It is also the longest window that leaves room in the 20 s
+// scans took 7.1 s to hear it, so 8 s is 0.9 s over the slowest seen. That
+// does not bound the tail: a present controller can still be missed, and a
+// miss is a retryable failed reading (protocol.md, "What 8 s does not
+// cover"). It is also the longest window that leaves room in the 20 s
 // default --timeout for the connect (5.9 s), the reply (3 s) and 2 s spare.
 // See "Scan window" in docs/reference/protocol.md.
 const scanWindow = 8 * time.Second

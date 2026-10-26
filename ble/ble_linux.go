@@ -230,6 +230,9 @@ func (a *Adapter) markConnected(found []Controller) {
 }
 
 // stopDiscovery asks BlueZ to stop discovering. Not discovering is fine.
+// BlueZ tracks discovery per D-Bus client, so this stops the library's
+// discovery only because a.object rides the same shared dbus.SystemBus()
+// connection the library starts discovery on.
 func (a *Adapter) stopDiscovery() error {
 	err := a.object.Call("org.bluez.Adapter1.StopDiscovery", 0).Err
 	if err != nil && strings.Contains(err.Error(), "No discovery started") {

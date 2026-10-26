@@ -131,8 +131,13 @@ func TestScanRecoversLibraryUUIDsPanic(t *testing.T) {
 // TestScanTimeToFindController scans for the test controller 20 times and logs
 // how long each took to hear it. The scan window is chosen from these numbers
 // (docs/reference/protocol.md, "Scan window"). It sleeps a second between
-// scans so each starts from a stopped adapter.
+// scans so each starts from a stopped adapter. It is a measurement, and a miss
+// is an accepted outcome of the window, so it runs only when
+// GO_PWR_MEASURE_SCAN is set, and logs misses rather than failing on them.
 func TestScanTimeToFindController(t *testing.T) {
+	if os.Getenv("GO_PWR_MEASURE_SCAN") == "" {
+		t.Skip("measurement: set GO_PWR_MEASURE_SCAN=1 to run it")
+	}
 	adapter := openAdapter(t)
 	mac := os.Getenv("GO_PWR_TEST_MAC")
 	var times []time.Duration
@@ -141,7 +146,7 @@ func TestScanTimeToFindController(t *testing.T) {
 		found, err := adapter.Scan(context.Background(), mac)
 		took := time.Since(started)
 		if err != nil {
-			t.Errorf("scan %d: %v after %v", i, err, took)
+			t.Logf("scan %d: missed: %v after %v", i, err, took)
 			continue
 		}
 		t.Logf("scan %2d: %s found after %v, RSSI %d dBm", i, found[0].Address, took.Round(time.Millisecond), found[0].RSSI)

@@ -8,9 +8,9 @@ import (
 	"fmt"
 )
 
-// indexTempOther is the third temperature-like field, +22 beside the °C and
-// °F fields in the real captures. Its meaning is unknown, but it is signed
-// like they are.
+// indexTempOther is the third temperature-like field, equal to the °C field
+// in every real capture. Its meaning is unknown, but it is signed like the
+// temperatures are.
 const indexTempOther = 18
 
 // variableWidth marks a field whose width is not checked.

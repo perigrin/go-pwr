@@ -210,16 +210,12 @@ func TestReorderSwapTally(t *testing.T) {
 	// Framed lola replies: the Assembler fails the 8 swaps with chunk 0,
 	// which holds the leading space, and the 7 that move the CRLF chunk
 	// (8) away from the end. The other 21 all pass whole, all decode and
-	// every one trips the width backstop.
+	// every one trips the width backstop, 10 of them the °C/°F check too.
 	for _, c := range cs[1:] {
 		got := tallySwaps(t, c)
-		if got.whole != 21 || got.decodeFails != 0 || got.width != 21 || got.silent != 0 {
-			t.Errorf("%s: tally = %+v, want 21 whole, 0 Decode failures, 21 width, 0 silent", c.name, got)
+		if got.whole != 21 || got.decodeFails != 0 || got.width != 21 || got.silent != 0 || got.temp != 10 {
+			t.Errorf("%s: tally = %+v, want 21 whole, 0 Decode failures, 21 width, 10 °C/°F, 0 silent", c.name, got)
 		}
-	}
-	got = tallySwaps(t, cs[1])
-	if got.temp != 10 || got.both != 10 {
-		t.Errorf("%s: tally = %+v, want 10 caught by the °C/°F check as well", cs[1].name, got)
 	}
 }
 

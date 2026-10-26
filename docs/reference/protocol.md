@@ -153,6 +153,29 @@ The controller reports each temperature as a whole number, and which way it roun
 
 **The check only warns for now.** It has not been confirmed against the cold and hot captures, which are still to be taken (decision 0001). Making it fail readings is a separate, later change.
 
+### Reordered notifications
+
+Two warnings back up in-order delivery from the Bluetooth layer, and neither is a guard: nothing in a reply's content shows that its chunks arrived out of order.
+
+- **Field widths.** Every field has the same width in all 22 real replies (the afternoon one and the 21 from lola): 5 digits, except indices 1, 9, 10, 12, 28, 29 and 30 (3 digits) and index 31 (empty). Indices 16 to 18 are signed temperatures and are not checked, since 100 °F or more, or a minus sign, may change their width. A field of another width adds a warning (`ErrFieldWidth`) and the reading is still returned. The table in `status/widths.go` is checked against the real captures only, never an altered or derived file.
+- **°C/°F check.** See above.
+
+Measured on the real replies, with the chunks exchanged and delivered in key order (these are altered and derived data, not captures). For the afternoon reply, which is the 166-byte body alone, the chunks are its 20-byte cuts (8 of 20 bytes and one of 6), judged by the body rule alone; the 36 pairwise swaps give:
+
+| Outcome | Swaps |
+|---|---|
+| Pass the whole rule | 31 |
+| of those, fail Decode (a `+` or extra digits land in a gating field) | 4 |
+| of the 27 that decode, caught by the °C/°F check | 13 |
+| of the 27, caught by the width check | 26 |
+| of the 27, caught by neither | 1 |
+
+The one that passes every warning check is **chunks 0 and 3**: the reply is whole, and the field that held 13.24 V reads `00000`. It is accepted silently and reports 0.00 V, which the rule in **Plausibility bounds** (a battery field of `00000` is accepted) records. It is the swap only in-order delivery prevents. Derived from the one capture.
+
+The same measurement on the 9 notifications of the real framed lola replies (all 21 give the same counts): 15 swaps do not pass whole, 8 because chunk 0 holds the leading space (`ErrNotFramed`, including 0↔3) and 7 because they move the CRLF chunk from the end (`ErrNotWhole`). The other 21 all decode, all trip the width check, and 10 also trip the °C/°F check. So no swap of a framed reply passes undetected, because chunk 0 anchors the framing, but that is a property of the framing rule, not of the reply's values. Every reversal, every rotation and every reordering of three consecutive chunks also either fails the read or carries a warning, in both forms.
+
+The checks are statistical and only warn. A real reply never trips either (22 of 22).
+
 ## Notification sizes and timing on lola
 
 Measured on 2026-10-25 at 22:08–22:10 EDT on lola (Raspberry Pi Zero W, BCM43438, BlueZ 5.82, kernel 6.18), about 2 m from the controller (RSSI −62 to −77 dBm across the session's advertisements), at night: battery 13.18–13.19 V, PV 0.65 V, no charge current. The trace is `status/testdata/lola-timing/session-1.btsnoop`, its `btmon -r` decoding is beside it, and each reply's notifications are in `session-1-reply-NN.seq.txt` (line 1 names the trace; every other line is microseconds since the request write, then the payload in hex). 21 replies: four fresh connections of two replies each, then one held connection of 13. BlueZ's GATT cache was cleared first (`bluetoothctl remove`), so the first connection includes service discovery. Confidence: **observed** on this one night, one adapter and one controller.

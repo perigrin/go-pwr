@@ -5,6 +5,7 @@ package status
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -344,6 +345,41 @@ func TestAssembleBytesAfterCRLFNotWhole(t *testing.T) {
 	addAll(t, a, tok, 1, chunks)
 	if _, whole, err := a.Add(tok, 10, []byte(" ")); whole || !errors.Is(err, ErrTrailingBytes) {
 		t.Errorf("Add after whole: whole=%v err=%v, want ErrTrailingBytes", whole, err)
+	}
+}
+
+// TestAssembleLolaSequences assembles every captured lola sequence found in
+// testdata/lola-timing, whatever their number, in its recorded order. Each
+// must be whole exactly when its last notification arrives, and equal the
+// notifications joined.
+func TestAssembleLolaSequences(t *testing.T) {
+	files, err := filepath.Glob("testdata/lola-timing/*.seq.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no captured sequences in testdata/lola-timing")
+	}
+	a := NewAssembler()
+	var key uint64
+	for n := 1; n <= len(files); n++ {
+		chunks := lolaSequence(t, n)
+		tok := a.Begin(key)
+		var reply string
+		var whole bool
+		for i, c := range chunks {
+			key++
+			var err error
+			if reply, whole, err = a.Add(tok, key, c); err != nil {
+				t.Fatalf("reply-%02d chunk %d: %v", n, i+1, err)
+			}
+			if whole != (i == len(chunks)-1) {
+				t.Fatalf("reply-%02d: whole=%v after chunk %d of %d", n, whole, i+1, len(chunks))
+			}
+		}
+		if reply != lolaReply(t, n) {
+			t.Errorf("reply-%02d: assembled %q, want the notifications joined", n, reply)
+		}
 	}
 }
 

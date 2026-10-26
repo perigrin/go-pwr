@@ -1452,3 +1452,7 @@ After acceptance, refinement surfaced four points the decision left open. perigr
 9. **Low battery means 12.2 V** for the night capture, with "no PV" meaning PV voltage below battery voltage and zero charge current (chain review PB-12, AL-6).
 10. **Race testing runs on the Mac:** `go test -race` covers the platform-neutral code (the scan guard, the read buffer, reply assembly) on darwin/arm64. `-race` isn't supported on lola's linux/arm, so the lola soak test covers the hardware side without it (chain review AL-10, P3-4).
 11. **Fakes are acceptable generally, where a real condition can't be produced reliably.** This widens decision 6 beyond the ordering test. It covers, for example, the scan-panic recovery test's injected Device1 signal with UUIDs missing (chain review AL-16, PB-23, FR-9, FV-3). A fake never stands in for a real capture when a test proves that a real reading is accepted. *Amends: decision 0001 Testing and coding-conventions.md.*
+
+### Owner decision during execution
+
+12. **Reply framing is required** (2026-10-26, after the lola timing capture): every real reply on lola is 169 bytes, a leading space (`0x20`), the 166-byte body, then `\r\n`. A whole reply must start with `0x20` and end with `\r\n`; the 32-field rule (the last empty after a trailing `;`) applies to the body between them; `raw` keeps all 169 bytes; the `\r\n` is the completion marker. *Amends: decision 0001, Behavior and errors (*Whole*) and The protocol.*

@@ -55,7 +55,7 @@ The bluetooth library hard-codes `hci0`. If an adapter reset brought the adapter
 
 **How the app decides the reply is complete:** it expects 9 notifications, or gives up after 2 s with whatever has arrived. Only then does it split the text on `;` and accept 30, 31 or 32 fields. If the count is wrong, it keeps showing the previous reading. With 20-byte notifications, the observed 166-byte reply is exactly 9 notifications. After 8 of them, the text already splits into 30 fields, the last a truncated `02`. So the app's acceptance of 30 or 31 fields may be tolerance of a cut-off reply rather than evidence that other firmware sends fewer fields. Notification sizes depend on the negotiated MTU, which BlueZ may raise, so a different client will see different chunking.
 
-The observed reply has **32 fields**: 31 values and a trailing `;`.
+The reply's body has **32 fields**: 31 values and a trailing `;`. On lola every reply also carries framing: a leading space (`0x20`) and a trailing `\r\n` (see **Notification sizes and timing on lola**). `go-pwr` requires both, and the `\r\n` marks the reply complete (owner decision 12).
 
 No unlock is needed. The app uses its unlock sequence only from the settings screen.
 
@@ -162,7 +162,7 @@ Measured on 2026-10-25 at 22:08–22:10 EDT on lola (Raspberry Pi Zero W, BCM434
  00000;000;13187;14525;00000;00003;00183;39402;00008;003;100;00645;000;00000;00019;00049;+20;+68;+20;00000;00015;00015;00016;00080;00133;00000;02309;02025;009;025;008;\r\n
 ```
 
-Split on `;`, that is still 32 fields, but the first is ` 00000` and the last is `\r\n`, not empty. The afternoon capture in **Example reply** is the 166-byte body alone. How it was taken is not recorded, so whether the controller sent the space and `\r\n` then is unknown. A trailing `\r\n` would be a natural end-of-reply marker.
+Split on `;`, that is still 32 fields, but the first is ` 00000` and the last is `\r\n`, not empty. The afternoon capture in **Example reply** is the 166-byte body alone. How it was taken is not recorded, so whether the controller sent the space and `\r\n` then is unknown. perigrin decided (owner decision 12) that the framing is required: a whole reply starts with `0x20` and ends with `\r\n`, the 32-field rule applies to the body between them, `raw` keeps all 169 bytes, and the `\r\n` is the completion marker.
 
 - **ATT MTU: 23.** BlueZ offers 517 in Exchange MTU, and the controller answers 23. So notifications carry at most 20 bytes, like the phone app's.
 - **Sizes:** every reply is nine notifications, 8 × 20 bytes plus one of 9.

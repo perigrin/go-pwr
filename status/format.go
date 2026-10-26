@@ -23,13 +23,13 @@ type Record struct {
 
 // jsonLine holds the keys of decision 0001's json example, in its order.
 type jsonLine struct {
-	Time     string      `json:"time"`
-	BootID   string      `json:"boot_id"`
-	UptimeS  float64     `json:"uptime_s"`
-	Device   string      `json:"device"`
-	BatteryV json.Number `json:"battery_v"`
-	SolarV   json.Number `json:"solar_v"`
-	ChargeA  json.Number `json:"charge_a"`
+	Time     string  `json:"time"`
+	BootID   string  `json:"boot_id"`
+	UptimeS  float64 `json:"uptime_s"`
+	Device   string  `json:"device"`
+	BatteryV float64 `json:"battery_v"`
+	SolarV   float64 `json:"solar_v"`
+	ChargeA  float64 `json:"charge_a"`
 
 	ChargeState     *string `json:"charge_state"`
 	ChargeStateCode *int    `json:"charge_state_code"`
@@ -90,12 +90,13 @@ func WriteJSONLine(w io.Writer, rec Record) error {
 	return nil
 }
 
-// hundredths converts a milli-unit count to units with two decimals,
-// rounding half up. It works in integers, so no float rounding error can
-// reach the text.
-func hundredths(milli int) json.Number {
-	h := (milli + 5) / 10
-	return json.Number(fmt.Sprintf("%d.%02d", h/100, h%100))
+// hundredths converts a milli-unit count to units, rounding half up to two
+// decimals. The rounding is integer arithmetic, so no float error enters
+// it. Dividing the whole hundredths by 100 gives the float64 nearest the
+// two-decimal value, which encoding/json prints in its shortest form: no
+// artefacts, and no trailing zeros (13200 mV is 13.2).
+func hundredths(milli int) float64 {
+	return float64((milli+5)/10) / 100
 }
 
 // codeNameOrNil names a code with name, or gives nil when the code failed

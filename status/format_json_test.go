@@ -6,8 +6,9 @@ package status
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -67,9 +68,10 @@ func TestRoundHalfUp(t *testing.T) {
 		{22879, "22.88"},
 		{655, "0.66"},
 		{5, "0.01"},
-		{4, "0.00"},
+		{4, "0"},
 		{1005, "1.01"},
-		{99999, "100.00"},
+		{99999, "100"},
+		{13200, "13.2"},
 	}
 	for _, c := range cases {
 		got := jsonValues(t, withGating(t, c.mv, c.mv, c.mv))
@@ -187,7 +189,7 @@ func TestRoundHalfUpNotHalfEven(t *testing.T) {
 }
 
 func TestRoundNoFloatArtifacts(t *testing.T) {
-	twoDecimals := regexp.MustCompile(`^\d+\.\d\d$`)
+	twoDecimals := regexp.MustCompile(`^\d+(\.\d{1,2})?$`)
 	for milli := 0; milli <= 99999; milli++ {
 		got := jsonValues(t, withGating(t, milli, milli, milli))["battery_v"]
 		if !twoDecimals.MatchString(got) {
@@ -195,9 +197,12 @@ func TestRoundNoFloatArtifacts(t *testing.T) {
 		}
 		// Half up in integers: the hundredths are (milli+5)/10.
 		hundredths := (milli + 5) / 10
-		want := fmt.Sprintf("%d.%02d", hundredths/100, hundredths%100)
-		if got != want {
-			t.Fatalf("%d mV encodes as %s, want %s", milli, got, want)
+		f, err := strconv.ParseFloat(got, 64)
+		if err != nil {
+			t.Fatalf("%d mV encodes as %s: %v", milli, got, err)
+		}
+		if f != float64(hundredths)/100 || int(math.Round(f*100)) != hundredths {
+			t.Fatalf("%d mV encodes as %s, want %d hundredths", milli, got, hundredths)
 		}
 	}
 }

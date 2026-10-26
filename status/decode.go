@@ -17,34 +17,29 @@ const (
 	indexSolarMV   = 11
 )
 
-// Plausibility bounds for the three gating fields, inclusive. Each comes
-// from what the GP-PWM-30-SB can report, never from the range seen in
+// Plausibility bounds for the three gating fields, inclusive. They come
+// from what the field format can carry, never from the range seen in
 // captures; docs/reference/protocol.md, Plausibility bounds, gives the
-// reasons in full.
+// reasons in full. The manual's ratings (35 VDC input, 37.5 A input
+// current) are tolerances, not limits on what the controller reports, so
+// they are not used: a cold-morning array above 35 V must not suppress the
+// battery reading.
 const (
 	// minChargeMA is zero: the field is unsigned, and no current flows at
 	// night.
 	minChargeMA = 0
-	// maxChargeMA is the controller's rated maximum continuous DC input
-	// current, 37.5 A (GP-PWM-30-SB User Manual, 1.2 System Voltage and
-	// Current). A PWM controller passes the array current to the battery,
-	// so it can't charge with more.
-	maxChargeMA = 37500
+	// maxChargeMA is the largest value five unsigned digits can carry.
+	maxChargeMA = 99999
 	// minBatteryMV is zero: a real reading must never be rejected however
-	// low, and the controller can report with its battery disconnected
-	// while the array powers it.
+	// low (decision 0001, Behavior and errors).
 	minBatteryMV = 0
-	// maxBatteryMV is 35 VDC, the highest voltage any terminal of the
-	// controller is rated for (User Manual, 1.2 and 1.6 Specifications,
-	// Maximum Solar DC Input Voltage). A 12 V nominal battery above it is
-	// not a voltage this controller can measure.
-	maxBatteryMV = 35000
+	// maxBatteryMV is the largest value five unsigned digits can carry.
+	maxBatteryMV = 99999
 	// minSolarMV is zero: the field is unsigned, and the array gives
 	// nothing at night.
 	minSolarMV = 0
-	// maxSolarMV is the controller's rated maximum solar DC input
-	// voltage, 35 VDC (User Manual, 1.2 and 1.6).
-	maxSolarMV = 35000
+	// maxSolarMV is the largest value five unsigned digits can carry.
+	maxSolarMV = 99999
 )
 
 // Reading is one decoded status reply.
@@ -77,15 +72,16 @@ func Decode(reply string) (Reading, error) {
 // value isn't one the controller sent in that field.
 const maxFieldDigits = 5
 
-// parseField decodes a decimal field: an optional sign followed by one to
-// maxFieldDigits ASCII digits.
-func parseField(s string) (int, error) {
-	digits := strings.TrimLeft(s, "+-")
-	if len(s)-len(digits) > 1 {
-		return 0, fmt.Errorf("%q has more than one sign", s)
-	}
-	if len(digits) == 0 || len(digits) > maxFieldDigits {
+// parseUnsigned decodes an unsigned decimal field: one to maxFieldDigits
+// ASCII digits, with no sign.
+func parseUnsigned(s string) (int, error) {
+	if len(s) == 0 || len(s) > maxFieldDigits {
 		return 0, fmt.Errorf("%q is not 1 to %d digits", s, maxFieldDigits)
+	}
+	for _, c := range []byte(s) {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("%q is not an unsigned decimal", s)
+		}
 	}
 	return strconv.Atoi(s)
 }
@@ -95,7 +91,7 @@ func gatingField(reply string, fields []string, name string, index, min, max int
 	if index >= len(fields) {
 		return 0, fmt.Errorf("decode %s (field %d) in reply %q: reply has only %d fields", name, index, reply, len(fields))
 	}
-	v, err := parseField(fields[index])
+	v, err := parseUnsigned(fields[index])
 	if err != nil {
 		return 0, fmt.Errorf("decode %s (field %d) in reply %q: %w", name, index, reply, err)
 	}

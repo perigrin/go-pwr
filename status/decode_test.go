@@ -63,12 +63,9 @@ func TestGatingBounds(t *testing.T) {
 		index int
 		value string
 	}{
-		{"charge current", indexChargeMA, "37501"},
-		{"charge current", indexChargeMA, "99999"},
-		{"battery voltage", indexBatteryMV, "35001"},
-		{"battery voltage", indexBatteryMV, "99999"},
-		{"PV voltage", indexSolarMV, "35001"},
-		{"PV voltage", indexSolarMV, "99999"},
+		{"charge current", indexChargeMA, "100000"},
+		{"battery voltage", indexBatteryMV, "100000"},
+		{"PV voltage", indexSolarMV, "100000"},
 	}
 	for _, c := range cases {
 		reply := alteredReply(t, c.index, c.value)
@@ -102,7 +99,7 @@ func wantGatingError(t *testing.T, reply, field string) {
 
 func TestGatingFieldNonNumericFails(t *testing.T) {
 	for _, f := range gatingFields {
-		for _, v := range []string{"", "+", "-", "13 44", " 1344", "0000A"} {
+		for _, v := range []string{"", "+", "-", "13 44", " 1344", "0000A", "+13244", "+0", "１２３", "١٢٣"} {
 			wantGatingError(t, alteredReply(t, f.index, v), f.name)
 		}
 	}
@@ -110,7 +107,7 @@ func TestGatingFieldNonNumericFails(t *testing.T) {
 
 func TestGatingNegativeValueFails(t *testing.T) {
 	for _, f := range gatingFields {
-		for _, v := range []string{"-13244", "-0001", "-1"} {
+		for _, v := range []string{"-13244", "-0001", "-1", "-0", "-00000"} {
 			wantGatingError(t, alteredReply(t, f.index, v), f.name)
 		}
 	}

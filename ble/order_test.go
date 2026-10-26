@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -96,24 +97,32 @@ type delivered struct {
 }
 
 // recordSink returns a sink that records what it is given and a function that
-// waits for the consumer to finish and returns the record.
-func recordSink(c *notificationConsumer, ch <-chan *dbus.Signal) func() []delivered {
+// waits until the consumer has seen want notifications, then returns the
+// record. godbus's handler drops signals still queued when it is terminated,
+// so a test must wait for delivery before terminating it.
+func recordSink(c *notificationConsumer, ch <-chan *dbus.Signal, want int) func() []delivered {
 	var (
 		mu  sync.Mutex
 		got []delivered
 	)
+	done := make(chan struct{})
 	c.sink = func(key uint64, chunk []byte) {
 		mu.Lock()
 		defer mu.Unlock()
 		got = append(got, delivered{key, chunk})
+		if len(got) == want {
+			close(done)
+		}
 	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		c.consume(ch)
-	}()
+	go c.consume(ch)
 	return func() []delivered {
-		<-done
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			mu.Lock()
+			defer mu.Unlock()
+			return got
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		return got
@@ -129,7 +138,7 @@ func TestOrderedDeliveryInProcess(t *testing.T) {
 	const n = 4500
 	handler, ch := signalChannel()
 	c := &notificationConsumer{path: fff1Path}
-	wait := recordSink(c, ch)
+	wait := recordSink(c, ch, n)
 
 	seq := uint64(100)
 	for i := range n {
@@ -138,9 +147,8 @@ func TestOrderedDeliveryInProcess(t *testing.T) {
 		handler.DeliverSignal("org.freedesktop.DBus.Properties", "PropertiesChanged", valueSignal(fff1Path, seq, payload[:]))
 		seq += 1 + uint64(i%3)
 	}
-	handler.Terminate()
-
 	got := wait()
+	handler.Terminate()
 	if len(got) != n {
 		t.Fatalf("consumer saw %d notifications, want %d", len(got), n)
 	}

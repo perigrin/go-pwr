@@ -105,6 +105,22 @@ From the Android app's `PwmBatteryUtil.getChargingMode`. Its exact strings, miss
 
 From `PwmBatteryUtil.getBatteryType`: 0 `Sealed`, 1 `FLOODED`, 2 `LIFEPO`, 3 `AGM`, 4 `CUSTOM`, 5 `Not Used`.
 
+### Plausibility bounds
+
+Only three fields can fail a reading on their values: charge current (index 0), battery voltage (index 2) and PV voltage (index 11). Each must be an unsigned decimal of one to five ASCII digits, the width the controller sends, and lie inside the bounds below, inclusive. The bounds come from what the field format can carry, never from the range seen in captures, and must never reject a real reading, however low.
+
+| Field | Lower bound | Upper bound |
+|---|---|---|
+| Charge current | 0 mA | 99,999 mA |
+| Battery voltage | 0 mV | 99,999 mV |
+| PV voltage | 0 mV | 99,999 mV |
+
+**Why not the controller's ratings.** The GP-PWM-30-SB User Manual (2019, sections 1.2 and 1.6) rates the controller for 35 VDC solar input and 37.5 A continuous input current, and its battery input at 9.0 to 15.5 VDC. These are tolerances, not limits on what the controller reports. An array's open-circuit voltage rises on a cold morning and can pass 35 V, and current can spike past the rating at the edge of a cloud. Because a gating field out of bounds fails the whole reading, a bound at a rating would suppress the battery voltage the shutdown script needs whenever PV or current exceeded it. The only limit certain to hold is the field's width, so that is the bound. Below it, nothing in a field's value can show that the field is misaligned. That guard is in-order delivery (decision 0001, *Shape of the code*).
+
+**A battery field of `00000` is accepted.** The manual's 9.0 to 15.5 VDC battery input range is a rating, not a promise that the controller stops reporting below it, and the decision forbids rejecting a real reading however low. The 0.00 V reading that one chunk swap produces is therefore not caught here. In-order delivery from the Bluetooth layer is what prevents it.
+
+A sign of either kind, an empty field, embedded spaces, hexadecimal or non-ASCII digits, or more than five digits fail the reading.
+
 ## Other writes: do not send
 
 `FFF2` is the input to a serial bridge. The app's other commands are ASCII strings sent **one character per write**, so the controller is parsing a character stream. That makes any stray byte on `FFF2` potentially part of a command. A monitoring client should write only the single byte `0x20`.

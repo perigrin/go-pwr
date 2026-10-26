@@ -142,7 +142,7 @@ func runAsNobody(t *testing.T, args ...string) result {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("runuser", append([]string{"-u", "nobody", "--", "env", "HOME=/tmp", child}, args...)...)
+	cmd := commandInGroup("runuser", append([]string{"-u", "nobody", "--", "env", "HOME=/tmp", child}, args...)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	done := make(chan error, 1)
@@ -153,7 +153,9 @@ func runAsNobody(t *testing.T, args ...string) result {
 	select {
 	case err = <-done:
 	case <-time.After(60 * time.Second):
-		cmd.Process.Kill()
+		// runuser starts go-pwr as a child; kill the group, or go-pwr goes on
+		// polling after the deny drop-in is gone.
+		killGroup(cmd)
 		t.Fatalf("go-pwr as nobody still running after 60 s\nstdout:\n%sstderr:\n%s", &stdout, &stderr)
 	}
 	var exit *exec.ExitError

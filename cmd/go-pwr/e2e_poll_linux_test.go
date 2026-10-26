@@ -5,9 +5,9 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -36,6 +36,19 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// commandInGroup makes a command that runs in a process group of its own,
+// so killGroup can kill what it starts too.
+func commandInGroup(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd
+}
+
+// killGroup kills the command and everything in its process group.
+func killGroup(cmd *exec.Cmd) {
+	syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }
 
 // liveRun is a go-pwr process that is still running.
@@ -188,15 +201,18 @@ func uptimeGaps(readings []polled) []float64 {
 	return gaps
 }
 
-// noFailedReadings reports whether stderr has no error line but the one a
-// signal draws from a reading it cut short.
-func noFailedReadings(stderr string) bool {
+// failedReadings counts the stderr lines that are a reading failing: error
+// lines that don't quote a reply. An error line that quotes the reply, for a
+// field that didn't decode, and a warning line, are on a reading that was
+// printed. A signal that ends a reading draws no line at all.
+func failedReadings(stderr string) int {
+	n := 0
 	for _, line := range strings.Split(strings.TrimSuffix(stderr, "\n"), "\n") {
-		if line != "" && !strings.Contains(line, "context canceled") {
-			return false
+		if strings.HasPrefix(line, "error: ") && !strings.Contains(line, ` reply "`) {
+			n++
 		}
 	}
-	return true
+	return n
 }
 
 // wantStartToStart checks that readings made with --poll=interval start every
@@ -240,7 +256,7 @@ func TestPollIntervalStartToStart(t *testing.T) {
 		t.Errorf("status %d, want 0", got.status)
 	}
 	wantOnlyJSONObjects(t, got.stdout)
-	wantStartToStart(t, parseReadings(t, got.stdout), 10*time.Second, noFailedReadings(got.stderr))
+	wantStartToStart(t, parseReadings(t, got.stdout), 10*time.Second, failedReadings(got.stderr) == 0)
 	requireLinkDown(t, mac)
 }
 
@@ -281,6 +297,9 @@ func TestPollSignalsExit0(t *testing.T) {
 				t.Errorf("took %v to exit between readings, want a prompt exit", took)
 			}
 			wantOnlyJSONObjects(t, got.stdout)
+			if got.stderr != "" {
+				t.Errorf("stderr %q, want nothing: a signal is not an error", got.stderr)
+			}
 			requireLinkDown(t, mac)
 		})
 	}
@@ -298,6 +317,9 @@ func TestPollSignalMidReading(t *testing.T) {
 			}
 			if r.stdout != "" {
 				wantOnlyJSONObjects(t, r.stdout)
+			}
+			if r.stderr != "" {
+				t.Errorf("stderr %q, want nothing: a signal is not an error", r.stderr)
 			}
 			requireLinkDown(t, mac)
 		})
@@ -362,14 +384,16 @@ func TestPollWithLeftoverLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// bluetoothctl can only connect to a device BlueZ has an object for, so
+	// scan for the controller first, as go-pwr itself does.
 	scanFor(t, adapter, mac)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	leftover, err := adapter.Connect(ctx, mac)
-	if err != nil {
-		t.Fatalf("make the leftover link: %v", err)
+	t.Cleanup(func() {
+		sh(t, "bluetoothctl disconnect "+mac)
+		requireLinkDown(t, mac)
+	})
+	if out := sh(t, "bluetoothctl --timeout 30 connect "+mac); !strings.Contains(out, "Connection successful") {
+		t.Fatalf("bluetoothctl connect %s: %s", mac, out)
 	}
-	t.Cleanup(func() { leftover.Close() })
 
 	r := startGoPwr(t, "--mac", mac, "--poll=15s", "--format", "json")
 	for want := 1; want <= 2; want++ {
@@ -383,4 +407,33 @@ func TestPollWithLeftoverLink(t *testing.T) {
 	}
 	r.stop(syscall.SIGTERM)
 	requireLinkDown(t, mac)
+}
+
+// killGroup must kill the whole process tree: runuser starts go-pwr as a
+// child, and killing runuser alone leaves go-pwr running as nobody.
+func TestKillGroupKillsTheChildToo(t *testing.T) {
+	cmd := commandInGroup("sh", "-c", "sleep 300 & echo $!; wait")
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var child int
+	if _, err := fmt.Fscan(out, &child); err != nil {
+		t.Fatalf("read the child's pid: %v", err)
+	}
+	t.Cleanup(func() { syscall.Kill(child, syscall.SIGKILL) })
+
+	killGroup(cmd)
+	cmd.Wait()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(child, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Errorf("child %d is still running after killGroup", child)
 }

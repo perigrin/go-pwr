@@ -50,8 +50,8 @@ func pollThroughFailure(t *testing.T, mac string, breakIt, fix func(*testing.T))
 	}
 	wantOnlyJSONObjects(t, got.stdout)
 	for _, line := range strings.Split(strings.TrimSuffix(got.stderr, "\n"), "\n") {
-		if !strings.HasPrefix(line, "error: ") {
-			t.Errorf("stderr line %q is not an error line", line)
+		if !strings.HasPrefix(line, "error: ") && !strings.HasPrefix(line, "warning: ") {
+			t.Errorf("stderr line %q is not an error or warning line", line)
 		}
 	}
 	requireLinkDown(t, mac)
@@ -204,7 +204,7 @@ func TestPollIntervalSurvivesClockStep(t *testing.T) {
 		t.Errorf("no reading's time stepped, so the run did not cross the clock step")
 	}
 	// uptime_s is continuous across it and the interval still counts in it.
-	wantStartToStart(t, readings, 10*time.Second, noFailedReadings(got.stderr))
+	wantStartToStart(t, readings, 10*time.Second, failedReadings(got.stderr) == 0)
 	for i, gap := range uptimeGaps(readings) {
 		if gap > 40 {
 			t.Errorf("uptime_s jumped %.0f s at reading %d", gap, i+1)

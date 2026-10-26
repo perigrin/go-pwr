@@ -52,14 +52,17 @@ const (
 	slowestSighting = 7100 * time.Millisecond
 	slowestMacScan  = 4440 * time.Millisecond
 	slowestConnect  = 9790 * time.Millisecond
+	// slowestDiscovery is the slowest service discovery after a connect.
+	slowestDiscovery = 970 * time.Millisecond
 )
 
 // TestScanWindowWithinTimeout checks the path a machine uses, with --mac: the
 // scan stops at the address, so the slowest such scan, the slowest connect and
 // the reply limit must fit in the default timeout. A scan without --mac runs
-// the whole window, and window + slowest connect + reply is 20.79 s, which
-// does not fit; a one-shot without --mac can fail as a retryable reading, and
-// a person can pass a longer --timeout (protocol.md, "Time budget on lola").
+// the whole window, and window + slowest connect + discovery + reply is about
+// 21.8 s, which does not fit; a one-shot without --mac can fail as a retryable
+// reading, and a person can pass a longer --timeout. perigrin accepted this
+// (owner decision 13; protocol.md, "Time budget on lola").
 func TestScanWindowWithinTimeout(t *testing.T) {
 	if scanWindow <= 0 {
 		t.Fatalf("scanWindow = %v, want it positive", scanWindow)
@@ -70,10 +73,10 @@ func TestScanWindowWithinTimeout(t *testing.T) {
 	if slowestMacScan > scanWindow {
 		t.Errorf("slowest scan with an address %v is longer than the window %v", slowestMacScan, scanWindow)
 	}
-	total := slowestMacScan + slowestConnect + status.TotalTimeout
+	total := slowestMacScan + slowestConnect + slowestDiscovery + status.TotalTimeout
 	if total > defaultTimeout {
-		t.Errorf("scan %v + connect %v + reply %v = %v, want at most the default timeout %v",
-			slowestMacScan, slowestConnect, status.TotalTimeout, total, defaultTimeout)
+		t.Errorf("scan %v + connect %v + discovery %v + reply %v = %v, want at most the default timeout %v",
+			slowestMacScan, slowestConnect, slowestDiscovery, status.TotalTimeout, total, defaultTimeout)
 	}
 }
 

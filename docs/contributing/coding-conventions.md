@@ -34,3 +34,10 @@ without `GO_PWR_TEST_MAC`.
 `FFF2`). The Go Power! app also has reset, force-charge and settings commands;
 see [the protocol reference](../reference/protocol.md). Never add code that can
 send them.
+
+The `ble` package exports no function, method or interface method that accepts
+bytes to write, whether as `byte`, `[]byte`, `...byte` or a defined type
+built on them. An address or mode is a typed value, never raw bytes.
+`TestNoExportedByteWriter` in `ble/api_test.go` enforces this by parsing every
+non-test `.go` file in `ble/` with build tags ignored, so the Linux files are
+checked on the Mac. Unexported helpers may take `[]byte`.

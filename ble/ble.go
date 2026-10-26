@@ -96,6 +96,7 @@ package ble
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -170,10 +171,26 @@ func (e *classifiedError) Error() string {
 	case e.cause == nil:
 		return e.msg
 	case e.msg == "":
-		return e.cause.Error()
+		return trimmed(e.cause).Error()
 	}
-	return fmt.Sprintf("%s: %v", e.msg, e.cause)
+	return fmt.Sprintf("%s: %v", e.msg, trimmed(e.cause))
 }
+
+// unclassified returns msg with cause, for an error that fits no class.
+func unclassified(msg string, cause error) error {
+	return fmt.Errorf("%s: %w", msg, trimmed(cause))
+}
+
+// trimmedError is an error whose text has no trailing newline. D-Bus error
+// messages end in one, which would show as an escaped \n in the middle of
+// the one-line error go-pwr prints. The error underneath stays reachable.
+type trimmedError struct{ err error }
+
+func trimmed(err error) error { return trimmedError{err} }
+
+func (e trimmedError) Error() string { return strings.TrimRight(e.err.Error(), "\r\n") }
+
+func (e trimmedError) Unwrap() error { return e.err }
 
 func (e *classifiedError) Unwrap() []error {
 	var errs []error

@@ -84,13 +84,28 @@ func runGoPwr(t *testing.T, args ...string) (r result, took time.Duration) {
 	return result{status, stdout.String(), stderr.String()}, took
 }
 
+// linkDown reports whether bluetoothctl info says the link to the controller
+// is down. It fails closed: a bluetoothctl that fails, or output that doesn't
+// name the device, is not "down". BlueZ saying it has no such device, or
+// Connected: no, is.
+func linkDown(mac string) (down bool, out string) {
+	raw, err := exec.Command("bluetoothctl", "info", mac).CombinedOutput()
+	out = string(raw)
+	if !strings.Contains(out, mac) {
+		return false, out
+	}
+	if strings.Contains(out, "not available") {
+		return true, out
+	}
+	return err == nil && strings.Contains(out, "Connected: no"), out
+}
+
 // requireLinkDown fails the test unless BlueZ reports the controller not
 // connected.
 func requireLinkDown(t *testing.T, mac string) {
 	t.Helper()
-	out := sh(t, "bluetoothctl info "+mac)
-	if strings.Contains(out, "Connected: yes") {
-		t.Errorf("link to %s is still up after go-pwr exited:\n%s", mac, out)
+	if down, out := linkDown(mac); !down {
+		t.Errorf("link to %s is not reported down after go-pwr exited:\n%s", mac, out)
 	}
 }
 

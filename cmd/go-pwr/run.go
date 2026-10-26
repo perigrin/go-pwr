@@ -46,7 +46,7 @@ func run(cfg config, stdout, stderr io.Writer) int {
 func oneShot(ctx context.Context, cfg config, stdout, stderr io.Writer) (code int) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(stderr, "error: internal error: %v\n", r)
+			printPanic(stderr, "", r)
 			code = 1
 		}
 	}()
@@ -57,37 +57,70 @@ func oneShot(ctx context.Context, cfg config, stdout, stderr io.Writer) (code in
 	}
 	ctx, cancel := context.WithTimeout(ctx, cfg.timeout)
 	defer cancel()
+	if !readOnce(ctx, cfg, adapter, stdout, stderr) {
+		return 1
+	}
+	return 0
+}
+
+// readOnce scans, connects, requests, decodes and prints one reading on an
+// open adapter, within ctx, and says whether a reading was printed. It
+// reports every failure on stderr itself, and a panic in it counts as a
+// failed reading, so a loop of readings goes on. The link is closed on every
+// way out.
+func readOnce(ctx context.Context, cfg config, adapter *ble.Adapter, stdout, stderr io.Writer) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			printPanic(stderr, "", r)
+			ok = false
+		}
+	}()
+	// The boot ID is read before the scan, so that a failure to read it can't
+	// cost a reply that was already received.
+	bootID, err := boot.ID()
+	if err != nil {
+		printError(stderr, err)
+		return false
+	}
 	found, err := adapter.Scan(ctx, cfg.mac)
 	if err != nil {
 		printError(stderr, err)
-		return 1
+		return false
 	}
 	controller, err := selectController(found)
 	if err != nil {
 		printError(stderr, err)
-		return 1
+		return false
 	}
 	conn, err := connect(ctx, adapter, controller.Address)
 	if err != nil {
 		printError(stderr, err)
-		return 1
+		return false
 	}
 	defer closeConn(conn, stderr)
 	reply, err := conn.RequestStatus(ctx)
 	if err != nil {
 		printError(stderr, err)
-		return 1
+		return false
 	}
-	rx := receivedReply{reply: reply, device: controller.Address, at: time.Now()}
-	if rx.bootID, err = boot.ID(); err != nil {
+	rx, err := receive(reply, controller.Address, bootID, boot.Uptime)
+	if err != nil {
 		printError(stderr, err)
-		return 1
+		return false
 	}
-	if rx.uptimeS, err = boot.Uptime(); err != nil {
-		printError(stderr, err)
-		return 1
+	return report(cfg, rx, stdout, stderr) == 0
+}
+
+// receive stamps a reply that has just been received with the local time and
+// the uptime taken together. An error from uptime quotes the reply, so the
+// reply that arrived is kept as evidence.
+func receive(reply, device, bootID string, uptime func() (float64, error)) (receivedReply, error) {
+	rx := receivedReply{reply: reply, device: device, at: time.Now(), bootID: bootID}
+	var err error
+	if rx.uptimeS, err = uptime(); err != nil {
+		return rx, &status.ReplyError{Reply: reply, Err: err}
 	}
-	return report(cfg, rx, stdout, stderr)
+	return rx, nil
 }
 
 // connect opens the link to the controller, trying again after a failed
@@ -103,11 +136,21 @@ func connect(ctx context.Context, adapter *ble.Adapter, address string) (*ble.Co
 		if attempt == connectAttempts || ctx.Err() != nil || errors.Is(err, ble.ErrNotFound) {
 			return nil, err
 		}
-		select {
-		case <-ctx.Done():
+		if err := waitToRetry(ctx, connectPause); err != nil {
 			return nil, err
-		case <-time.After(connectPause):
 		}
+	}
+}
+
+// waitToRetry pauses between connect attempts. When ctx ends in the pause,
+// the error says the reading was interrupted, which is what the person needs
+// to know, not the attempt that failed before it.
+func waitToRetry(ctx context.Context, pause time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("connect: interrupted while waiting to try again: %w", ctx.Err())
+	case <-time.After(pause):
+		return nil
 	}
 }
 
@@ -116,12 +159,22 @@ func connect(ctx context.Context, adapter *ble.Adapter, address string) (*ble.Co
 func closeConn(conn *ble.Conn, stderr io.Writer) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(stderr, "error: close: internal error: %v\n", r)
+			printPanic(stderr, "close", r)
 		}
 	}()
 	if err := conn.Close(); err != nil {
 		printError(stderr, fmt.Errorf("close: %w", err))
 	}
+}
+
+// printPanic writes a recovered panic to stderr as one error line, escaped
+// like any other, since its text can be anything. what names the step that
+// panicked, or is empty.
+func printPanic(stderr io.Writer, what string, r any) {
+	if what != "" {
+		what += ": "
+	}
+	printError(stderr, fmt.Errorf("%sinternal error: %v", what, r))
 }
 
 // printError writes err to stderr as one error line.

@@ -96,7 +96,7 @@ func describe(msg string, err error) error {
 		strings.HasPrefix(name, "org.freedesktop.DBus.Error.Spawn."):
 		return classify(nil, ErrBlueZNotRunning, msg, err)
 	}
-	return fmt.Errorf("%s: %w", msg, err)
+	return unclassified(msg, err)
 }
 
 // dbusErrorName returns the D-Bus error name in err's chain, or "".

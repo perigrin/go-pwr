@@ -21,9 +21,9 @@ func readProcUptime(t *testing.T) float64 {
 	if err != nil {
 		t.Fatalf("read /proc/uptime: %v", err)
 	}
-	v, err := strconv.ParseFloat(strings.Fields(string(b))[0], 64)
+	v, err := parseUptime(string(b))
 	if err != nil {
-		t.Fatalf("parse /proc/uptime %q: %v", b, err)
+		t.Fatalf("parse /proc/uptime: %v", err)
 	}
 	return v
 }
@@ -72,7 +72,7 @@ func setWallClock(t *testing.T, unixSeconds int64) {
 // timesyncd with NTP on, so the clock is left as it was.
 func TestUptimeIgnoresWallClockStep(t *testing.T) {
 	if os.Geteuid() != 0 {
-		t.Fatal("needs root: run with sudo -n")
+		t.Skip("needs root: run with sudo -n")
 	}
 	t.Cleanup(func() {
 		exec.Command("systemctl", "start", "systemd-timesyncd").Run()
@@ -115,5 +115,51 @@ func TestUptimeIgnoresWallClockStep(t *testing.T) {
 	}
 	if idAfter != idBefore {
 		t.Errorf("boot id changed across a wall-clock step: %q -> %q", idBefore, idAfter)
+	}
+}
+
+func TestBootIDNoTrailingNewline(t *testing.T) {
+	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		t.Fatalf("read boot_id: %v", err)
+	}
+	if !strings.HasSuffix(string(b), "\n") {
+		t.Fatalf("kernel boot_id %q no longer ends in a newline; this test needs rethinking", b)
+	}
+	id, err := ID()
+	if err != nil {
+		t.Fatalf("ID: %v", err)
+	}
+	if id != strings.TrimSpace(id) || strings.ContainsAny(id, "\n\r\t ") {
+		t.Errorf("ID() = %q has whitespace", id)
+	}
+}
+
+func TestUptimeNeverDecreases(t *testing.T) {
+	prev, err := Uptime()
+	if err != nil {
+		t.Fatalf("Uptime: %v", err)
+	}
+	first := prev
+	for i := 0; i < 1000; i++ {
+		v, err := Uptime()
+		if err != nil {
+			t.Fatalf("Uptime: %v", err)
+		}
+		if v < prev {
+			t.Fatalf("Uptime decreased: %.9f -> %.9f", prev, v)
+		}
+		prev = v
+	}
+	time.Sleep(10 * time.Millisecond)
+	last, err := Uptime()
+	if err != nil {
+		t.Fatalf("Uptime: %v", err)
+	}
+	if d := last - first; d <= 0 || d >= 1 {
+		t.Errorf("uptime advanced %.9f s over a short loop and 10 ms sleep, want a sub-second step", d)
+	}
+	if last == math.Trunc(last) && first == math.Trunc(first) {
+		t.Errorf("uptime %.9f and %.9f are whole seconds; want sub-second resolution", first, last)
 	}
 }

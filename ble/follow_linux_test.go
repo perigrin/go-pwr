@@ -341,3 +341,37 @@ func TestFollowRepeatedDrops(t *testing.T) {
 		t.Errorf("notification dropped: %v", err)
 	}
 }
+
+// TestFollowAdapterBlockedThenRecovers blocks the adapter with rfkill while a
+// connection is held. Readings then fail, retryably, and once the adapter is
+// unblocked the held connection is made again and read whole.
+func TestFollowAdapterBlockedThenRecovers(t *testing.T) {
+	requireRoot(t)
+	f, _ := newFollower(t)
+	restoreOnCleanup(t)
+
+	requireWholeReading(t, readWhole(t, f))
+
+	sh(t, "rfkill block bluetooth")
+	time.Sleep(time.Second)
+	for i := 1; i <= 2; i++ {
+		reply, took, err := followRead(f)
+		t.Logf("reading %d while blocked = %q, %v after %v", i, reply, err, took.Round(time.Millisecond))
+		if err == nil {
+			t.Errorf("reading %d while the adapter is blocked: no error, reply %q", i, reply)
+			continue
+		}
+		if !errors.Is(err, ErrRetryable) || errors.Is(err, ErrFatalAtStartup) {
+			t.Errorf("reading %d while blocked: error = %v, want ErrRetryable and not ErrFatalAtStartup", i, err)
+		}
+		if i == 1 && !errors.Is(err, ErrLinkDropped) {
+			t.Errorf("reading 1 while blocked: error = %v, want the held link reported dropped", err)
+		}
+	}
+
+	sh(t, "rfkill unblock bluetooth")
+	if !waitPowered(t) {
+		t.Fatal("adapter not powered 30s after unblocking it")
+	}
+	requireWholeReading(t, readWhole(t, f))
+}

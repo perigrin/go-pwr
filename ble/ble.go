@@ -87,6 +87,23 @@
 // connect and discovery times is in docs/reference/protocol.md, "Time budget
 // on lola".
 //
+// # Opening again
+//
+// An Adapter keeps the D-Bus object it was opened with, so it can't recover
+// from BlueZ or the system bus restarting. A loop of readings, such as
+// --poll, opens a new one with ReopenContext after each failed reading, which
+// reconnects a closed system bus. Its errors match ErrRetryable, where
+// OpenContext's match ErrFatalAtStartup.
+//
+// The reading's context bounds the calls this package makes itself: the
+// power-state read in OpenContext and ReopenContext, the same read after a
+// failed scan, the Connected reads, the connect and the request. It does not
+// bound the calls inside the bluetooth library: Enable's property read, and
+// the property read, discovery filter and object listing that a scan makes.
+// Those return when BlueZ answers or fails, so a BlueZ that never answers
+// could hold one. The poll tests on lola, with BlueZ masked and stopped or its
+// adapter gone, saw none outlast a reading's --timeout.
+//
 // The bluetooth library hard-codes the adapter name hci0. If an adapter
 // reset brought the adapter back as hci1, every retry would fail until the
 // program restarts. That is unlikely, because Linux reuses the lowest free
@@ -96,6 +113,7 @@ package ble
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -170,10 +188,26 @@ func (e *classifiedError) Error() string {
 	case e.cause == nil:
 		return e.msg
 	case e.msg == "":
-		return e.cause.Error()
+		return trimmed(e.cause).Error()
 	}
-	return fmt.Sprintf("%s: %v", e.msg, e.cause)
+	return fmt.Sprintf("%s: %v", e.msg, trimmed(e.cause))
 }
+
+// unclassified returns msg with cause, for an error that fits no class.
+func unclassified(msg string, cause error) error {
+	return fmt.Errorf("%s: %w", msg, trimmed(cause))
+}
+
+// trimmedError is an error whose text has no trailing newline. D-Bus error
+// messages end in one, which would show as an escaped \n in the middle of
+// the one-line error go-pwr prints. The error underneath stays reachable.
+type trimmedError struct{ err error }
+
+func trimmed(err error) error { return trimmedError{err} }
+
+func (e trimmedError) Error() string { return strings.TrimRight(e.err.Error(), "\r\n") }
+
+func (e trimmedError) Unwrap() error { return e.err }
 
 func (e *classifiedError) Unwrap() []error {
 	var errs []error
@@ -204,6 +238,11 @@ type Controller struct {
 // returns it for an address BlueZ has no device for, because no scan has found
 // it.
 var ErrNotFound = errors.New("controller not found")
+
+// ErrCleanupFailed is returned, joined to the error that ended an abandoned
+// connect, when BlueZ did not drop the link as asked within closeBound: the
+// link may still be up. It is never returned alone.
+var ErrCleanupFailed = errors.New("link may still be up")
 
 // ErrNotConnected is returned, wrapped, by RequestStatus on a Conn that was
 // never connected, or whose Close has been called. Nothing was written.

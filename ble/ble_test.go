@@ -6,6 +6,7 @@ package ble
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,5 +90,21 @@ const slowestClose = 4610 * time.Millisecond
 func TestCloseBoundHasMargin(t *testing.T) {
 	if closeBound < 2*slowestClose {
 		t.Errorf("closeBound = %v, want at least twice the slowest close measured (%v)", closeBound, slowestClose)
+	}
+}
+
+func TestErrorTextHasNoTrailingNewline(t *testing.T) {
+	// D-Bus error messages end in a newline.
+	dbusLike := errors.New("Method \"Get\" with signature \"ss\" doesn't exist\n")
+	for name, err := range map[string]error{
+		"classified":   classify(ErrRetryable, ErrNoAdapter, "read adapter", dbusLike),
+		"unclassified": unclassified("read adapter", dbusLike),
+	} {
+		if got := err.Error(); got != strings.TrimRight(got, "\r\n") || !strings.Contains(got, "doesn't exist") {
+			t.Errorf("%s: Error() = %q, want the message without a trailing newline", name, got)
+		}
+		if !errors.Is(err, dbusLike) {
+			t.Errorf("%s: the cause is no longer reachable with errors.Is", name)
+		}
 	}
 }

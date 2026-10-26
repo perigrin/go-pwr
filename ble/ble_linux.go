@@ -31,22 +31,44 @@ type Adapter struct {
 // or unblocks the adapter. Its errors match ErrFatalAtStartup and one of the
 // error classes in the package documentation.
 func Open() (*Adapter, error) {
+	return OpenContext(context.Background())
+}
+
+// OpenContext is Open, except that ctx ends the wait for BlueZ in the power
+// state read, which takes about 15 s to fail when BlueZ is masked. The
+// library's own calls in Enable are not bounded by ctx.
+func OpenContext(ctx context.Context) (*Adapter, error) {
+	return open(ctx, startupError)
+}
+
+// ReopenContext opens the adapter again, in the middle of a run, after a
+// failed reading: an Adapter keeps the D-Bus object it was opened with, so it
+// can't recover from BlueZ or the system bus restarting. It is OpenContext,
+// except that its errors match ErrRetryable, not ErrFatalAtStartup, because
+// at this point the program is past its startup and the failure is an
+// ordinary failed reading. A closed system bus is connected again.
+func ReopenContext(ctx context.Context) (*Adapter, error) {
+	return open(ctx, retryableError)
+}
+
+// open opens the adapter, and marks its errors with mark.
+func open(ctx context.Context, mark func(error) error) (*Adapter, error) {
 	conn, err := dbus.SystemBus()
 	if err != nil {
-		return nil, startupError(fmt.Errorf("connect to the system bus: %w", err))
+		return nil, mark(fmt.Errorf("connect to the system bus: %w", err))
 	}
 	object := conn.Object("org.bluez", dbus.ObjectPath("/org/bluez/"+adapterName))
-	if err := checkPowered(context.Background(), object); err != nil {
-		return nil, startupError(err)
+	if err := checkPowered(ctx, object); err != nil {
+		return nil, mark(err)
 	}
 	library := bluetooth.NewAdapter(adapterName)
 	if err := library.Enable(); err != nil {
 		// The library reads the adapter itself and may drop the typed D-Bus
 		// error, so look again with our own read to classify what went wrong.
-		if again := checkPowered(context.Background(), object); again != nil {
-			return nil, startupError(again)
+		if again := checkPowered(ctx, object); again != nil {
+			return nil, mark(again)
 		}
-		return nil, startupError(describe("enable adapter "+adapterName, err))
+		return nil, mark(describe("enable adapter "+adapterName, err))
 	}
 	return &Adapter{library: library, conn: conn, object: object}, nil
 }
@@ -96,7 +118,7 @@ func describe(msg string, err error) error {
 		strings.HasPrefix(name, "org.freedesktop.DBus.Error.Spawn."):
 		return classify(nil, ErrBlueZNotRunning, msg, err)
 	}
-	return fmt.Errorf("%s: %w", msg, err)
+	return unclassified(msg, err)
 }
 
 // dbusErrorName returns the D-Bus error name in err's chain, or "".
@@ -184,7 +206,7 @@ func (a *Adapter) Scan(ctx context.Context, mac string) ([]Controller, error) {
 		return nil, retryableError(fmt.Errorf("scan: %w", ctx.Err()))
 	}
 	if err != nil && (errors.Is(err, errScanPanicked) || (!matched && window.Err() == nil)) {
-		if checkErr := a.Check(); checkErr != nil {
+		if checkErr := a.checkContext(ctx); checkErr != nil {
 			return nil, checkErr
 		}
 		return nil, retryableError(fmt.Errorf("scan: %w", err))
@@ -192,7 +214,7 @@ func (a *Adapter) Scan(ctx context.Context, mac string) ([]Controller, error) {
 	if len(found) == 0 {
 		return nil, retryableError(fmt.Errorf("scan for %s: %w", describeTarget(mac), ErrNotFound))
 	}
-	a.markConnected(found)
+	a.markConnected(ctx, found)
 	return found, nil
 }
 
@@ -222,14 +244,14 @@ func describeTarget(mac string) string {
 // markConnected sets Connected on each controller this machine already holds
 // a link to. The library presents such a device with no signal strength, so
 // its RSSI would read 0 dBm.
-func (a *Adapter) markConnected(found []Controller) {
+func (a *Adapter) markConnected(ctx context.Context, found []Controller) {
 	for i := range found {
 		path := devicePath(a, found[i].Address)
-		connected, err := a.conn.Object("org.bluez", path).GetProperty("org.bluez.Device1.Connected")
+		on, err := connected(ctx, a.conn.Object("org.bluez", path))
 		if err != nil {
 			continue
 		}
-		if on, _ := connected.Value().(bool); on {
+		if on {
 			found[i].Connected = true
 			found[i].RSSI = 0
 		}

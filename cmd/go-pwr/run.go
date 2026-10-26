@@ -28,16 +28,20 @@ const connectAttempts = 3
 // connectPause is the wait between connect attempts.
 const connectPause = time.Second
 
-// run reads the controller and returns the exit status: 0 only if a reading
-// was printed, 1 otherwise. SIGINT and SIGTERM end a reading in progress,
-// and the link is closed on the way out.
+// run reads the controller and returns the exit status. A one-shot returns 0
+// only if a reading was printed, 1 otherwise. --poll reads until SIGINT or
+// SIGTERM, and returns 0 then, or 1 if it can't start. SIGINT and SIGTERM end
+// a reading in progress, and the link is closed on the way out.
 func run(cfg config, stdout, stderr io.Writer) int {
-	if cfg.poll > 0 || cfg.follow > 0 {
-		fmt.Fprintln(stderr, "go-pwr: --poll and --follow are not implemented")
+	if cfg.follow > 0 {
+		fmt.Fprintln(stderr, "go-pwr: --follow is not implemented")
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if cfg.poll > 0 {
+		return pollMode(ctx, cfg, stdout, stderr)
+	}
 	return oneShot(ctx, cfg, stdout, stderr)
 }
 
@@ -46,48 +50,81 @@ func run(cfg config, stdout, stderr io.Writer) int {
 func oneShot(ctx context.Context, cfg config, stdout, stderr io.Writer) (code int) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(stderr, "error: internal error: %v\n", r)
+			printPanic(stderr, "", r)
 			code = 1
 		}
 	}()
-	adapter, err := ble.Open()
+	adapter, err := ble.OpenContext(ctx)
 	if err != nil {
-		printError(stderr, err)
+		failed(ctx, stderr, err)
 		return 1
 	}
 	ctx, cancel := context.WithTimeout(ctx, cfg.timeout)
 	defer cancel()
+	if !readOnce(ctx, cfg, adapter, newRecordWriter(cfg, stdout), stderr) {
+		return 1
+	}
+	return 0
+}
+
+// readOnce scans, connects, requests, decodes and prints one reading on an
+// open adapter, within ctx, and says whether a reading was printed. It
+// reports every failure on stderr itself, and a panic in it counts as a
+// failed reading, so a loop of readings goes on. The link is closed on every
+// way out.
+func readOnce(ctx context.Context, cfg config, adapter *ble.Adapter, out recordWriter, stderr io.Writer) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			printPanic(stderr, "", r)
+			ok = false
+		}
+	}()
+	// The boot ID is read before the scan, so that a failure to read it can't
+	// cost a reply that was already received.
+	bootID, err := boot.ID()
+	if err != nil {
+		failed(ctx, stderr, err)
+		return false
+	}
 	found, err := adapter.Scan(ctx, cfg.mac)
 	if err != nil {
-		printError(stderr, err)
-		return 1
+		failed(ctx, stderr, err)
+		return false
 	}
 	controller, err := selectController(found)
 	if err != nil {
-		printError(stderr, err)
-		return 1
+		failed(ctx, stderr, err)
+		return false
 	}
 	conn, err := connect(ctx, adapter, controller.Address)
 	if err != nil {
-		printError(stderr, err)
-		return 1
+		failed(ctx, stderr, err)
+		return false
 	}
 	defer closeConn(conn, stderr)
 	reply, err := conn.RequestStatus(ctx)
 	if err != nil {
-		printError(stderr, err)
-		return 1
+		failed(ctx, stderr, err)
+		return false
 	}
-	rx := receivedReply{reply: reply, device: controller.Address, at: time.Now()}
-	if rx.bootID, err = boot.ID(); err != nil {
-		printError(stderr, err)
-		return 1
+	rx, err := receive(reply, controller.Address, bootID, boot.Uptime)
+	if err != nil {
+		failed(ctx, stderr, err)
+		return false
 	}
-	if rx.uptimeS, err = boot.Uptime(); err != nil {
-		printError(stderr, err)
-		return 1
+	return reportTo(out, rx, stderr) == 0
+}
+
+// receive stamps a reply that has just been received with the local time and
+// the uptime taken together. An error from uptime quotes the reply, so the
+// reply that arrived is kept as evidence.
+func receive(reply, device, bootID string, uptime func() (float64, error)) (receivedReply, error) {
+	rx := receivedReply{reply: reply, device: device, at: time.Now(), bootID: bootID}
+	var err error
+	if rx.uptimeS, err = uptime(); err != nil {
+		return rx, &status.ReplyError{Reply: reply, Err: err}
 	}
-	return report(cfg, rx, stdout, stderr)
+	return rx, nil
 }
 
 // connect opens the link to the controller, trying again after a failed
@@ -103,11 +140,21 @@ func connect(ctx context.Context, adapter *ble.Adapter, address string) (*ble.Co
 		if attempt == connectAttempts || ctx.Err() != nil || errors.Is(err, ble.ErrNotFound) {
 			return nil, err
 		}
-		select {
-		case <-ctx.Done():
+		if err := waitToRetry(ctx, connectPause); err != nil {
 			return nil, err
-		case <-time.After(connectPause):
 		}
+	}
+}
+
+// waitToRetry pauses between connect attempts. When ctx ends in the pause,
+// the error says the reading was interrupted, which is what the person needs
+// to know, not the attempt that failed before it.
+func waitToRetry(ctx context.Context, pause time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("connect: interrupted while waiting to try again: %w", ctx.Err())
+	case <-time.After(pause):
+		return nil
 	}
 }
 
@@ -116,12 +163,47 @@ func connect(ctx context.Context, adapter *ble.Adapter, address string) (*ble.Co
 func closeConn(conn *ble.Conn, stderr io.Writer) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(stderr, "error: close: internal error: %v\n", r)
+			printPanic(stderr, "close", r)
 		}
 	}()
 	if err := conn.Close(); err != nil {
 		printError(stderr, fmt.Errorf("close: %w", err))
 	}
+}
+
+// failed writes the error of a failed reading to stderr, unless a signal
+// ended the reading and the error is nothing but the cancellation: the person
+// who sent SIGINT or SIGTERM knows, and a supervisor stopping the service
+// shouldn't find an error in its journal. A deadline passing is still an
+// error, and so is a cancellation that left something behind, such as a link
+// BlueZ didn't drop (ble.ErrCleanupFailed).
+func failed(ctx context.Context, stderr io.Writer, err error) {
+	if errors.Is(ctx.Err(), context.Canceled) && errors.Is(err, context.Canceled) && !errors.Is(err, ble.ErrCleanupFailed) {
+		return
+	}
+	printError(stderr, err)
+}
+
+// protect runs one step of a reading and reports a panic in it as a failed
+// step, so a loop of readings goes on.
+func protect(stderr io.Writer, step func() bool) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			printPanic(stderr, "", r)
+			ok = false
+		}
+	}()
+	return step()
+}
+
+// printPanic writes a recovered panic to stderr as one error line, escaped
+// like any other, since its text can be anything. what names the step that
+// panicked, or is empty.
+func printPanic(stderr io.Writer, what string, r any) {
+	if what != "" {
+		what += ": "
+	}
+	printError(stderr, fmt.Errorf("%sinternal error: %v", what, r))
 }
 
 // printError writes err to stderr as one error line.
@@ -152,23 +234,43 @@ type receivedReply struct {
 	uptimeS float64
 }
 
-// report decodes a received reply, prints the reading on stdout in the
-// format cfg asks for and its diagnostics on stderr, and returns the exit
-// status: 0 if a reading was printed, 1 if not. Every stderr line about the
-// reply quotes it once.
+// recordWriter writes readings to stdout in one format. A text writer
+// remembers that it has written, so that it separates the readings of a
+// continuous mode with a blank line.
+type recordWriter interface {
+	Write(status.Record) error
+}
+
+// jsonWriter writes each reading as one JSON line.
+type jsonWriter struct{ w io.Writer }
+
+func (j jsonWriter) Write(rec status.Record) error { return status.WriteJSONLine(j.w, rec) }
+
+// newRecordWriter returns the writer for the format cfg asks for.
+func newRecordWriter(cfg config, stdout io.Writer) recordWriter {
+	if cfg.format == "json" {
+		return jsonWriter{stdout}
+	}
+	return status.NewTextWriter(stdout)
+}
+
+// report decodes a received reply and prints it, as reportTo does, for a
+// single reading.
 func report(cfg config, rx receivedReply, stdout, stderr io.Writer) int {
+	return reportTo(newRecordWriter(cfg, stdout), rx, stderr)
+}
+
+// reportTo decodes a received reply, prints the reading with out and its
+// diagnostics on stderr, and returns the exit status: 0 if a reading was
+// printed, 1 if not. Every stderr line about the reply quotes it once.
+func reportTo(out recordWriter, rx receivedReply, stderr io.Writer) int {
 	reading, err := status.Decode(rx.reply)
 	if err != nil {
 		printError(stderr, err)
 		return 1
 	}
 	rec := status.Record{Time: rx.at, BootID: rx.bootID, UptimeS: rx.uptimeS, Device: rx.device, Reading: reading}
-	if cfg.format == "json" {
-		err = status.WriteJSONLine(stdout, rec)
-	} else {
-		err = status.NewTextWriter(stdout).Write(rec)
-	}
-	if err != nil {
+	if err = out.Write(rec); err != nil {
 		printError(stderr, err)
 		return 1
 	}

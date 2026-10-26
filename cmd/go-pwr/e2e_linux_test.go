@@ -84,13 +84,28 @@ func runGoPwr(t *testing.T, args ...string) (r result, took time.Duration) {
 	return result{status, stdout.String(), stderr.String()}, took
 }
 
+// linkDown reports whether bluetoothctl info says the link to the controller
+// is down. It fails closed: a bluetoothctl that fails, or output that doesn't
+// name the device, is not "down". BlueZ saying it has no such device, or
+// Connected: no, is.
+func linkDown(mac string) (down bool, out string) {
+	raw, err := exec.Command("bluetoothctl", "info", mac).CombinedOutput()
+	out = string(raw)
+	if !strings.Contains(out, mac) {
+		return false, out
+	}
+	if strings.Contains(out, "not available") {
+		return true, out
+	}
+	return err == nil && strings.Contains(out, "Connected: no"), out
+}
+
 // requireLinkDown fails the test unless BlueZ reports the controller not
 // connected.
 func requireLinkDown(t *testing.T, mac string) {
 	t.Helper()
-	out := sh(t, "bluetoothctl info "+mac)
-	if strings.Contains(out, "Connected: yes") {
-		t.Errorf("link to %s is still up after go-pwr exited:\n%s", mac, out)
+	if down, out := linkDown(mac); !down {
+		t.Errorf("link to %s is not reported down after go-pwr exited:\n%s", mac, out)
 	}
 }
 
@@ -253,6 +268,9 @@ func TestOneShotInterruptedExit1(t *testing.T) {
 			if r.status != 1 || r.stdout != "" {
 				t.Errorf("status %d, stdout %q, want 1 and nothing", r.status, r.stdout)
 			}
+			if r.stderr != "" {
+				t.Errorf("stderr %q, want nothing: a signal is not an error", r.stderr)
+			}
 			requireLinkDown(t, mac)
 		})
 	}
@@ -330,6 +348,9 @@ func TestOneShotSIGTERMExit1(t *testing.T) {
 			if r.status != 1 || r.stdout != "" {
 				t.Errorf("status %d, stdout %q, want 1 and nothing", r.status, r.stdout)
 			}
+			if r.stderr != "" {
+				t.Errorf("stderr %q, want nothing: a signal is not an error", r.stderr)
+			}
 			requireLinkDown(t, mac)
 		})
 	}
@@ -367,5 +388,23 @@ func TestOneShotStdoutOnlyReadings(t *testing.T) {
 	failed, _ := runGoPwr(t, "--mac", mac, "--format", "json", "--timeout=1s")
 	if failed.status != 1 || failed.stdout != "" || failed.stderr == "" {
 		t.Errorf("failed run: status %d, stdout %q, stderr %q, want 1, nothing, an error on stderr", failed.status, failed.stdout, failed.stderr)
+	}
+}
+
+// A signal that lands while the adapter is being opened is quiet, like one
+// in the scan: the open's error is a bare cancellation. This needs the
+// system bus but no controller.
+func TestOneShotSignalDuringOpenIsQuiet(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ble.OpenContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenContext on a cancelled context = %v, want an error matching context.Canceled", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := oneShot(ctx, config{format: "json", mac: "C3:00:00:58:51:40", timeout: time.Minute}, &stdout, &stderr)
+	if code != 1 || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Errorf("code %d, stdout %q, stderr %q, want 1 and nothing at all", code, stdout.String(), stderr.String())
 	}
 }

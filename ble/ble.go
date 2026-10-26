@@ -66,6 +66,12 @@ import (
 	"time"
 )
 
+// statusRequest is the one value this package ever writes to the controller's
+// FFF2 characteristic: a single space, which asks for a status reply. It is
+// passed, as this variable, at the one GATT write call site, and
+// TestSingleStatusWriteCallSite holds both facts.
+var statusRequest = []byte{0x20}
+
 // controllerName is the Bluetooth name the GP-PWM-30-SB advertises.
 const controllerName = "GP-PWM-30-SB"
 
@@ -164,6 +170,10 @@ type Controller struct {
 // returns it for an address BlueZ has no device for, because no scan has found
 // it.
 var ErrNotFound = errors.New("controller not found")
+
+// ErrNotConnected is returned, wrapped, by RequestStatus on a Conn that was
+// never connected, or whose Close has been called. Nothing was written.
+var ErrNotConnected = errors.New("not connected")
 
 // ErrUnsupportedPlatform is returned by every operation on an operating
 // system where the Bluetooth layer has no implementation.

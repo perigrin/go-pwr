@@ -43,6 +43,8 @@ Measured on lola (Raspberry Pi Zero W, BlueZ, Open reading `org.bluez.Adapter1.P
 | `nobody` under a bus policy that denies `send_destination="org.bluez"` | `org.freedesktop.DBus.Error.AccessDenied` | The message starts `Rejected send message, 3 matched rules`. |
 | Adapter powered off (`bluetoothctl power off`) or soft-blocked (`rfkill block bluetooth`) | none | The adapter stays on the bus with `Powered` false. Powered off and blocked look the same to `Open`. |
 
+If the system bus itself can't be reached (tested with `DBUS_SYSTEM_BUS_ADDRESS` pointing at a missing socket), the dial error is not classified: nothing observed says what it means for BlueZ. The error is still fatal at startup.
+
 The bluetooth library hard-codes `hci0`. If an adapter reset brought the adapter back as `hci1`, retries would fail until the program restarts. That is unlikely, because Linux reuses the lowest free index; unbinding and rebinding the driver on lola brought it back as `hci0`.
 
 ## Status request

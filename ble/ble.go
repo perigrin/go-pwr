@@ -17,14 +17,17 @@
 //
 // # Errors
 //
-// Errors from Open say which class they belong to and when they happened.
-// Tell them apart with errors.Is, never by message text. The class is one
-// of ErrNoAdapter, ErrAccessDenied, ErrBlueZNotRunning and
-// ErrAdapterUnavailable (powered off or blocked). The classes Open returns
+// Errors from Open and Adapter.Check say when they happened and, when they
+// can, which class they belong to. Tell them apart with errors.Is, never by
+// message text. The class, when there is one, is one of ErrNoAdapter,
+// ErrAccessDenied, ErrBlueZNotRunning and ErrAdapterUnavailable (powered
+// off or blocked). The classes Open returns
 // also match ErrFatalAtStartup: the program exits 1 before its first
 // reading. The same conditions after Open has succeeded match ErrRetryable
 // instead: they are an ordinary failed reading, retried on the next poll.
-// The underlying D-Bus error stays reachable with errors.As.
+// An error that fits no class, such as an unreachable system bus, matches
+// only ErrFatalAtStartup or ErrRetryable. The underlying D-Bus error stays
+// reachable with errors.As.
 //
 // On Linux, Open classifies by D-Bus error name, as observed on lola (see
 // docs/reference/protocol.md): org.freedesktop.DBus.Error.UnknownObject is

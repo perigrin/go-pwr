@@ -29,7 +29,7 @@ type Adapter struct {
 func Open() (*Adapter, error) {
 	conn, err := dbus.SystemBus()
 	if err != nil {
-		return nil, classify(ErrFatalAtStartup, ErrBlueZNotRunning, "connect to the system bus", err)
+		return nil, startupError(fmt.Errorf("connect to the system bus: %w", err))
 	}
 	object := conn.Object("org.bluez", dbus.ObjectPath("/org/bluez/"+adapterName))
 	if err := checkPowered(object); err != nil {
@@ -37,7 +37,12 @@ func Open() (*Adapter, error) {
 	}
 	library := bluetooth.NewAdapter(adapterName)
 	if err := library.Enable(); err != nil {
-		return nil, startupError(fmt.Errorf("enable adapter %s: %w", adapterName, err))
+		// The library reads the adapter itself and may drop the typed D-Bus
+		// error, so look again with our own read to classify what went wrong.
+		if again := checkPowered(object); again != nil {
+			return nil, startupError(again)
+		}
+		return nil, startupError(describe("enable adapter "+adapterName, err))
 	}
 	return &Adapter{library: library, object: object}, nil
 }
@@ -58,7 +63,7 @@ func (a *Adapter) Check() error {
 func checkPowered(object dbus.BusObject) error {
 	powered, err := object.GetProperty(poweredProperty)
 	if err != nil {
-		return describe(err)
+		return describe("read adapter "+adapterName+" power state", err)
 	}
 	if on, _ := powered.Value().(bool); !on {
 		return classify(nil, ErrAdapterUnavailable, "adapter "+adapterName+" is powered off or blocked", nil)
@@ -67,9 +72,8 @@ func checkPowered(object dbus.BusObject) error {
 }
 
 // describe classifies a D-Bus error by its name.
-func describe(err error) error {
+func describe(msg string, err error) error {
 	name := dbusErrorName(err)
-	msg := "read adapter " + adapterName + " power state"
 	switch {
 	case name == "org.freedesktop.DBus.Error.UnknownObject":
 		return classify(nil, ErrNoAdapter, msg, err)

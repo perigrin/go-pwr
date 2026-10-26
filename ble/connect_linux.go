@@ -118,18 +118,12 @@ func (c *Connection) Close() error {
 }
 
 // disconnect asks BlueZ to disconnect the device and waits up to closeBound
-// for it to report the link down. A device that is not connected, or that
-// BlueZ no longer knows, counts as down.
+// for it to report the link down. It asks even when no link is up yet, since
+// that also cancels a connect BlueZ is still making. A device that is not
+// connected, or that BlueZ no longer knows, counts as down.
 func disconnect(object dbus.BusObject) error {
 	ctx, cancel := context.WithTimeout(context.Background(), closeBound)
 	defer cancel()
-	up, err := connected(ctx, object)
-	if err != nil {
-		return ignoreGone(err)
-	}
-	if !up {
-		return nil
-	}
 	if err := object.CallWithContext(ctx, deviceInterface+".Disconnect", 0).Err; err != nil && !isGone(err) {
 		return err
 	}

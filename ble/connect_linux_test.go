@@ -5,7 +5,10 @@ package ble
 
 import (
 	"context"
+	"errors"
 	"os"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,7 +49,7 @@ func waitLinkDown(t *testing.T, adapter *Adapter, mac string, wait time.Duration
 // it does not depend on the code under test.
 func ensureLinkDownOnCleanup(t *testing.T, mac string) {
 	t.Helper()
-	t.Cleanup(func() { sh(t, "bluetoothctl disconnect "+mac) })
+	t.Cleanup(func() { sh(t, "bluetoothctl disconnect "+mac+"; true") })
 }
 
 // scanFor finds the controller, since the library connects only to a device
@@ -84,5 +87,88 @@ func TestConnectAndClose(t *testing.T) {
 	}
 	if linkUp(t, adapter, mac) {
 		t.Error("link still up right after Close, want it down")
+	}
+}
+
+// settledGoroutines waits up to 3 seconds for the goroutine count to fall to
+// want or below, and returns the count it ended on.
+func settledGoroutines(want int) int {
+	deadline := time.Now().Add(3 * time.Second)
+	for runtime.NumGoroutine() > want && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	return runtime.NumGoroutine()
+}
+
+// goroutineBaseline lets the goroutines of a finished scan settle, then
+// returns how many are running.
+func goroutineBaseline() int {
+	time.Sleep(time.Second)
+	return settledGoroutines(0)
+}
+
+func TestConnectAbandonedAtTimeout(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+	ensureLinkDownOnCleanup(t, mac)
+	scanFor(t, adapter, mac)
+	baseline := goroutineBaseline()
+
+	// A connect takes seconds on lola, so 300 ms ends it part way.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	conn, err := adapter.Connect(ctx, mac)
+	took := time.Since(started)
+	t.Logf("Connect(%s) with a 300ms deadline = %v after %v", mac, err, took.Round(time.Millisecond))
+
+	if conn != nil {
+		conn.Close()
+		t.Fatal("Connect() made a link inside 300 ms, want the deadline to cut it short")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrRetryable) {
+		t.Errorf("Connect() error = %v, want DeadlineExceeded and ErrRetryable", err)
+	}
+	if linkUp(t, adapter, mac) {
+		t.Error("link up after the abandoned connect returned, want it down")
+	}
+	if got := settledGoroutines(baseline); got > baseline {
+		t.Errorf("%d goroutines after the abandoned connect, want %d or fewer", got, baseline)
+	}
+	// BlueZ goes on connecting on its own unless it is told to stop, and
+	// connects take seconds, so wait long enough for a late link to appear.
+	time.Sleep(lateLinkWait)
+	if linkUp(t, adapter, mac) {
+		t.Errorf("link came up %v after the abandoned connect, want BlueZ's attempt cancelled", lateLinkWait)
+	}
+}
+
+// lateLinkWait is longer than the slowest connect measured on lola.
+const lateLinkWait = 8 * time.Second
+
+func TestConnectWithLeftoverLink(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+	ensureLinkDownOnCleanup(t, mac)
+	scanFor(t, adapter, mac)
+
+	if out := sh(t, "bluetoothctl --timeout 30 connect "+mac); !strings.Contains(out, "Connection successful") {
+		t.Fatalf("bluetoothctl connect %s: %s", mac, out)
+	}
+	if !linkUp(t, adapter, mac) {
+		t.Fatal("no leftover link to test with")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	conn, err := adapter.Connect(ctx, mac)
+	if err != nil {
+		t.Fatalf("Connect() over a leftover link error = %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Errorf("Close() error = %v", err)
+	}
+	if linkUp(t, adapter, mac) {
+		t.Error("link still up after Close, want it down")
 	}
 }

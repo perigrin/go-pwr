@@ -4,6 +4,7 @@
 package status
 
 import (
+	"errors"
 	"strings"
 	"sync"
 )
@@ -11,6 +12,16 @@ import (
 // replyFields is how many fields the body of a whole reply has, the last
 // one empty after a trailing ';' (decision 0001, Behavior and errors).
 const replyFields = 32
+
+// Why a read fails. Each is wrapped in a *ReplyError that carries the bytes
+// received so far.
+var (
+	// ErrKeyOrder: a notification's key was not above the one before it.
+	ErrKeyOrder = errors.New("notification keys are not strictly increasing")
+	// ErrTooManyFields: the reply has more fields than a whole one, so it
+	// can never become whole.
+	ErrTooManyFields = errors.New("reply has more than 32 fields")
+)
 
 // Token names one read. Notifications added under an earlier token never
 // become part of a later read.
@@ -25,6 +36,8 @@ type Assembler struct {
 	mu   sync.Mutex
 	tok  Token
 	buf  strings.Builder
+	last uint64 // key of the latest notification added
+	err  error  // set once the read has failed; the read is then closed
 	done bool
 }
 
@@ -40,6 +53,8 @@ func (a *Assembler) Begin(boundary uint64) Token {
 	defer a.mu.Unlock()
 	a.tok++
 	a.buf.Reset()
+	a.last = boundary
+	a.err = nil
 	a.done = false
 	return a.tok
 }
@@ -49,11 +64,28 @@ func (a *Assembler) Begin(boundary uint64) Token {
 func (a *Assembler) Add(tok Token, key uint64, chunk []byte) (string, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.err != nil {
+		return a.buf.String(), false, a.err
+	}
+	if key <= a.last {
+		return a.fail(ErrKeyOrder)
+	}
+	a.last = key
 	a.buf.Write(chunk)
 	reply := a.buf.String()
+	if strings.Count(reply, ";") >= replyFields {
+		return a.fail(ErrTooManyFields)
+	}
 	if !strings.HasSuffix(reply, "\r\n") {
 		return reply, false, nil
 	}
 	a.done = true
 	return reply, true, nil
+}
+
+// fail closes the read with err, carrying the bytes received so far.
+func (a *Assembler) fail(err error) (string, bool, error) {
+	reply := a.buf.String()
+	a.err = &ReplyError{Reply: reply, Err: err}
+	return reply, false, a.err
 }

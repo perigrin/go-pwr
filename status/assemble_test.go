@@ -4,6 +4,8 @@
 package status
 
 import (
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -55,4 +57,72 @@ func TestAssembleTokenStartsFreshRead(t *testing.T) {
 	if want := lolaReply(t, 2); reply != want {
 		t.Errorf("reply = %q, want exactly reply-02 %q", reply, want)
 	}
+}
+
+func TestAssembleRequiresIncreasingKeys(t *testing.T) {
+	chunks := lolaSequence(t, 1)
+	a := NewAssembler()
+	tok := a.Begin(0)
+	for i, key := range []uint64{1, 2, 3} {
+		if _, _, err := a.Add(tok, key, chunks[i]); err != nil {
+			t.Fatalf("Add key %d: %v", key, err)
+		}
+	}
+	_, whole, err := a.Add(tok, 2, chunks[3])
+	if !errors.Is(err, ErrKeyOrder) {
+		t.Fatalf("Add with a decreasing key: err = %v, want ErrKeyOrder", err)
+	}
+	if whole {
+		t.Error("whole after a decreasing key")
+	}
+	// The read has failed: later chunks with good keys don't revive it.
+	for i := 4; i < len(chunks); i++ {
+		if _, whole, err := a.Add(tok, uint64(10+i), chunks[i]); err == nil || whole {
+			t.Fatalf("Add after a failed read: whole=%v err=%v, want an error", whole, err)
+		}
+	}
+}
+
+// alteredOver32 is the real reply session-1-reply-01 with "008;" glued on
+// after the trailing ';', which makes its body 33 fields.
+func alteredOver32(t *testing.T) string {
+	t.Helper()
+	reply := lolaReply(t, 1)
+	return strings.TrimSuffix(reply, "\r\n") + "008;\r\n"
+}
+
+func TestAssembleOver32FieldsFailsAtOnce(t *testing.T) {
+	reply := alteredOver32(t)
+	if n := strings.Count(reply, ";"); n != replyFields {
+		t.Fatalf("altered reply has %d semicolons, want %d", n, replyFields)
+	}
+	chunks := splitEvery(reply, 20)
+	a := NewAssembler()
+	tok := a.Begin(0)
+	// The 33rd field's separator is the 32nd ';', in the chunk holding "008;".
+	failAt := -1
+	semicolons := 0
+	for i, c := range chunks {
+		semicolons += strings.Count(string(c), ";")
+		if semicolons > replyFields-1 {
+			failAt = i
+			break
+		}
+	}
+	for i, c := range chunks {
+		_, whole, err := a.Add(tok, uint64(i+1), c)
+		if whole {
+			t.Fatalf("whole at chunk %d", i+1)
+		}
+		switch {
+		case i < failAt && err != nil:
+			t.Fatalf("chunk %d failed early: %v", i+1, err)
+		case i == failAt:
+			if !errors.Is(err, ErrTooManyFields) {
+				t.Fatalf("chunk %d: err = %v, want ErrTooManyFields", i+1, err)
+			}
+			return
+		}
+	}
+	t.Fatal("never failed")
 }

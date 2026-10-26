@@ -55,3 +55,41 @@ func TestFollowHoldsOneConnection(t *testing.T) {
 	}
 	requireLinkDown(t, mac)
 }
+
+func TestFollowReconnectsAfterDrop(t *testing.T) {
+	mac := requireHardware(t)
+	t.Cleanup(func() { sh(t, "bluetoothctl disconnect "+mac) })
+	r := startGoPwr(t, "--mac", mac, "--follow=5s", "--format", "json")
+	if !r.waitFor(60*time.Second, func() bool { return r.readings() >= 4 }) {
+		t.Fatalf("fewer than 4 readings in 60 s; stderr %q", r.stderr)
+	}
+
+	// Cut the link from this end, as the controller going out of range does
+	// from the other.
+	if out := sh(t, "bluetoothctl disconnect "+mac); !strings.Contains(out, "Disconnection successful") {
+		t.Fatalf("bluetoothctl disconnect %s: %s", mac, out)
+	}
+	before := r.readings()
+	if !r.waitFor(15*time.Second, func() bool { return r.errorLines() >= 1 }) {
+		t.Fatalf("no error line on stderr 15 s after the drop; running: %v", r.running())
+	}
+	if !r.running() {
+		t.Fatalf("go-pwr exited on a dropped link\nstderr:\n%s", r.stderr)
+	}
+	if !strings.Contains(r.stderr.String(), "dropped") {
+		t.Errorf("stderr %q does not say the link dropped", r.stderr)
+	}
+	// The link is made again at a following interval, and readings resume.
+	if !r.waitFor(60*time.Second, func() bool { return r.readings() >= before+3 }) {
+		t.Fatalf("readings did not resume in 60 s after the drop (%d before it, %d now); stderr:\n%s", before, r.readings(), r.stderr)
+	}
+	got := r.stop(syscall.SIGTERM)
+	if got.status != 0 {
+		t.Errorf("status %d, want 0", got.status)
+	}
+	wantOnlyJSONObjects(t, got.stdout)
+	if n := failedReadings(got.stderr); n != 1 {
+		t.Errorf("%d failed readings, want exactly the one the drop caused; stderr:\n%s", n, got.stderr)
+	}
+	requireLinkDown(t, mac)
+}

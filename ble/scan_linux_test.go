@@ -336,6 +336,11 @@ func TestScanConnectedNotZeroRSSI(t *testing.T) {
 	adapter := openAdapter(t)
 	mac := os.Getenv("GO_PWR_TEST_MAC")
 
+	// bluetoothctl can only connect to a device BlueZ has an object for, so
+	// find the controller first, as go-pwr itself does before connecting.
+	if _, err := adapter.Scan(context.Background(), mac); err != nil {
+		t.Fatalf("Scan(%s) before connecting: %v", mac, err)
+	}
 	t.Cleanup(func() { sh(t, "bluetoothctl disconnect "+mac) })
 	if out := sh(t, "bluetoothctl --timeout 30 connect "+mac); !strings.Contains(out, "Connection successful") {
 		t.Fatalf("bluetoothctl connect %s: %s", mac, out)

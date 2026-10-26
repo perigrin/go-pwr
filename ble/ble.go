@@ -248,6 +248,11 @@ var ErrCleanupFailed = errors.New("link may still be up")
 // never connected, or whose Close has been called. Nothing was written.
 var ErrNotConnected = errors.New("not connected")
 
+// ErrLinkDropped is returned, wrapped, by a Follower's Read when the link to
+// the controller went down while it was held, so the reading did not fail for
+// want of a reply. The next Read connects again.
+var ErrLinkDropped = errors.New("link to the controller dropped")
+
 // ErrUnsupportedPlatform is returned by every operation on an operating
 // system where the Bluetooth layer has no implementation.
 var ErrUnsupportedPlatform = errors.New("unsupported platform")

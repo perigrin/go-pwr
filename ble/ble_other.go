@@ -48,3 +48,23 @@ func (c *Conn) Close() error {
 func (c *Conn) RequestStatus(ctx context.Context) (string, error) {
 	return "", ErrUnsupportedPlatform
 }
+
+// Follower holds one connection to the controller across readings. On this
+// platform none can be made.
+type Follower struct{}
+
+// Follow returns a Follower whose every operation returns
+// ErrUnsupportedPlatform.
+func (a *Adapter) Follow(mac string) *Follower {
+	return &Follower{}
+}
+
+// Read returns ErrUnsupportedPlatform.
+func (f *Follower) Read(ctx context.Context) (string, error) {
+	return "", ErrUnsupportedPlatform
+}
+
+// Close returns ErrUnsupportedPlatform.
+func (f *Follower) Close() error {
+	return ErrUnsupportedPlatform
+}

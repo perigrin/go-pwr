@@ -34,3 +34,13 @@ func TestConnectUnsupportedPlatform(t *testing.T) {
 		t.Fatalf("Close() error = %v, want ErrUnsupportedPlatform", err)
 	}
 }
+
+func TestFollowUnsupportedPlatform(t *testing.T) {
+	f := (&Adapter{}).Follow("C3:00:00:58:51:40")
+	if _, err := f.Read(context.Background()); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("Read() error = %v, want ErrUnsupportedPlatform", err)
+	}
+	if err := f.Close(); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("Close() error = %v, want ErrUnsupportedPlatform", err)
+	}
+}

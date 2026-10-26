@@ -193,6 +193,20 @@ Split on `;`, that is still 32 fields, but the first is ` 00000` and the last is
 - **Timing:** notifications arrive in pairs, one pair per 30 ms connection event (the controller asks for a 20–30 ms interval). From the request write to the first notification: 33–96 ms, median 48 ms. To the last: 123–202 ms, median 142 ms. Gaps between notifications in a reply: median 1.4 ms, 90th percentile 29.5 ms, longest 88 ms. Across 168 gaps, each rounded to the nearest 7.5 ms: 103 near 0, 7 near 7.5 ms (actually 3.8–6.5 ms), 7 near 22.5 ms (23.6–26.1 ms), 42 near 30 ms, and 9 from 35 to 90 ms. Unrounded, 105 gaps are under 4 ms.
 - **Connect (first look, by `bluetoothctl connect` and polling `ServicesResolved` in a script; the go-pwr budget is measured in the connect issue):** the controller was seen 1.3 s into a scan. From connect to services resolved: 5.9 s with discovery, then 5.5, 2.5, 2.6 and 3.5 s with the cache warm.
 
+### Completion timing
+
+A reply that arrives whole needs no timer: its `\r\n` marks it complete. Timing only decides when a read gives up on a reply that is cut off or silent. `status/completion.go` holds the limits, and a test checks each is at least `TimingMargin` (10) times the longest value measured in the 21 captured replies (`status/testdata/lola-timing`).
+
+| Limit | Measured longest | Chosen | Why |
+|---|---|---|---|
+| `FirstNotificationTimeout`: request to first notification | 96 ms | 2 s | 21x the data. Also the Android app's own 2 s wait. |
+| `GapTimeout`: quiet time between two notifications | 88 ms | 1 s | 11x the data. A reply that has started should finish quickly, so a stall is caught sooner than the total. |
+| `TotalTimeout`: request to complete reply | 202 ms | 3 s | 15x the data. The most any read waits after its request, whatever the other two say. |
+
+The margin is wide because the capture is one night, one adapter and one controller, and a slower link must not turn a good reply into a failure. A negotiated MTU above 23 would make fewer, larger notifications and finish sooner, so the limits stay safe.
+
+Budget: the default `--timeout` is 20 s. The first look at connecting (above) saw the controller 1.3 s into a scan and services resolved 5.9 s after connect with discovery. That is 7.2 s, plus at most 3 s for `TotalTimeout`, 10.2 s, which leaves nearly 10 s of the 20 s. The connect issue re-checks this with go-pwr's own measurements. When a read gives up, the error quotes what arrived, or says that no reply was received. `--timeout` still bounds the whole reading, and a read's deadline is never later than that bound.
+
 ### Handle map
 
 From the discovery on the first connection. Read By Group Type and Read By Type named the services, characteristic declarations and values. The single Find Information Request (`0x0012`–`0xffff`) got Attribute Not Found, so the controller never named a descriptor: the two CCCD handles below are **inferred** from the one-handle gap after each notifying or indicating value, which is where BlueZ wrote its CCCD values.

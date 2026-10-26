@@ -140,3 +140,44 @@ func TestFollowSignalDuringFirstReading(t *testing.T) {
 		})
 	}
 }
+
+func TestFollowLongReadingNoMakeUp(t *testing.T) {
+	mac := requireHardware(t)
+	// The first reading scans and connects, which takes more than the 1 s
+	// interval: the second starts when it is done, and the intervals it
+	// missed are not made up. A reading on the held connection after that
+	// takes well under 1 s.
+	r := startGoPwr(t, "--mac", mac, "--follow=1s", "--format", "json")
+	time.Sleep(30 * time.Second)
+	got := r.stop(syscall.SIGTERM)
+	if got.status != 0 {
+		t.Errorf("status %d, want 0", got.status)
+	}
+	wantOnlyJSONObjects(t, got.stdout)
+	readings := parseReadings(t, got.stdout)
+	if len(readings) < 10 {
+		t.Fatalf("%d readings in 30 s, want at least 10", len(readings))
+	}
+	gaps := uptimeGaps(readings)
+	t.Logf("gaps %.1f", gaps)
+	// Make-up readings would follow the first, long one in a burst of gaps
+	// near zero. A reply's latency moves single gaps by up to a second, a slow
+	// one followed by a quick one, so the mean of the rest is the interval's
+	// measure, and no gap may be a burst.
+	rest := gaps[1:]
+	sum := 0.0
+	for i, gap := range rest {
+		sum += gap
+		if gap < 0.2 {
+			t.Errorf("reading %d came %.2f s after the one before: overlap or make-up readings", i+2, gap)
+		}
+	}
+	if mean := sum / float64(len(rest)); mean < 0.9 || mean > 1.4 {
+		t.Errorf("mean gap %.2f s, want the 1 s interval within 0.4 s", mean)
+	}
+	// 30 s of 1 s intervals, less the connect, with no make-up on top.
+	if len(readings) > 31 {
+		t.Errorf("%d readings in 30 s at a 1 s interval: make-up readings", len(readings))
+	}
+	requireLinkDown(t, mac)
+}

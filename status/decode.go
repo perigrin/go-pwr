@@ -102,8 +102,14 @@ func (e *FieldError) Unwrap() error { return e.Err }
 // Decode turns a reply into a Reading. It fails when a gating field (charge
 // current, battery voltage, PV voltage) is missing, doesn't decode, or lies
 // outside its plausibility bounds.
+//
+// A reply as the controller sends it is framed by a leading space and a
+// trailing CRLF (see Assembler); Decode reads the fields of the body between
+// them and keeps the whole reply in Raw. A reply without both parts of that
+// framing is taken as the body alone. Decode doesn't judge whether a reply is whole:
+// that is the Assembler's rule.
 func Decode(reply string) (Reading, error) {
-	fields := strings.Split(reply, ";")
+	fields := strings.Split(replyBody(reply), ";")
 	var r Reading
 	var err error
 	if r.ChargeMA, err = gatingField(reply, fields, "charge current", indexChargeMA, minChargeMA, maxChargeMA); err != nil {
@@ -144,6 +150,17 @@ func Decode(reply string) (Reading, error) {
 		r.Warnings = append(r.Warnings, w)
 	}
 	return r, nil
+}
+
+// replyBody returns the body of a framed reply, the bytes between its
+// leading space and trailing CRLF. A reply that lacks either part of the
+// framing is returned as it is, so a stray space in the first field is
+// never dropped.
+func replyBody(reply string) string {
+	if len(reply) >= 3 && reply[0] == ' ' && strings.HasSuffix(reply, "\r\n") {
+		return reply[1 : len(reply)-2]
+	}
+	return reply
 }
 
 // optionalField decodes fields[index] with parse.

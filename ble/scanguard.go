@@ -4,9 +4,14 @@
 package ble
 
 import (
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
+
+// errScanPanicked marks the error recoverScan returns after a panic.
+var errScanPanicked = errors.New("scan panicked")
 
 // libraryNotScanning is the text of the bluetooth library's errNotScanning,
 // which it does not export. StopScan returns it when no scan is running.
@@ -79,7 +84,7 @@ func recoverScan(scan func() error, guard *scanGuard, stopDiscovery func() error
 		if r == nil {
 			return
 		}
-		err = fmt.Errorf("scan panicked: %v", r)
+		err = fmt.Errorf("%w: %v", errScanPanicked, r)
 		if stopErr := guard.Stop(); stopErr != nil {
 			err = fmt.Errorf("%w; reset the scan: %v", err, stopErr)
 		}
@@ -88,4 +93,26 @@ func recoverScan(scan func() error, guard *scanGuard, stopDiscovery func() error
 		}
 	}()
 	return scan()
+}
+
+// stopWhenDone stops the scan when done closes, then keeps trying every retry
+// until the stop takes or ended closes. A stop sent before the library's Scan
+// has set up its state finds nothing to stop, so one try is not enough.
+func stopWhenDone(done, ended <-chan struct{}, guard *scanGuard, retry time.Duration) {
+	select {
+	case <-done:
+	case <-ended:
+		return
+	}
+	for {
+		guard.Stop()
+		if guard.Stopped() {
+			return
+		}
+		select {
+		case <-ended:
+			return
+		case <-time.After(retry):
+		}
+	}
 }

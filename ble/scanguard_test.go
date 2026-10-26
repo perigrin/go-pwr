@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // countingScanner stands in for the library's StopScan, which is not safe to
@@ -183,5 +184,42 @@ func TestRecoverScanPassesErrorsThrough(t *testing.T) {
 	}
 	if !guard.Stopped() {
 		t.Error("guard not ended after the scan returned")
+	}
+}
+
+func TestStopWhenDoneRetriesUntilTheScanStarts(t *testing.T) {
+	var calls atomic.Int32
+	guard := newScanGuard(func() error {
+		// The library's Scan has not set up its state for the first calls.
+		if calls.Add(1) < 4 {
+			return errors.New(libraryNotScanning)
+		}
+		return nil
+	})
+	done := make(chan struct{})
+	close(done)
+	finished := make(chan struct{})
+	go func() {
+		stopWhenDone(done, make(chan struct{}), guard, time.Millisecond)
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopWhenDone did not return after the stop took")
+	}
+	if got := calls.Load(); got != 4 {
+		t.Errorf("%d stops reached the scanner, want 4 (three before the scan started, then one that took)", got)
+	}
+}
+
+func TestStopWhenDoneGivesUpWhenTheScanEnds(t *testing.T) {
+	scanner := &countingScanner{}
+	guard := newScanGuard(scanner.stop)
+	ended := make(chan struct{})
+	close(ended)
+	stopWhenDone(make(chan struct{}), ended, guard, time.Millisecond)
+	if got := scanner.calls.Load(); got != 0 {
+		t.Errorf("%d stops reached the scanner after the scan ended on its own, want 0", got)
 	}
 }

@@ -108,6 +108,30 @@
 // reset brought the adapter back as hci1, every retry would fail until the
 // program restarts. That is unlikely, because Linux reuses the lowest free
 // index.
+//
+// # Holding a connection
+//
+// A Follower, from Adapter.Follow, holds one connection across readings, for
+// --follow, where Connect and Close serve one reading. Its Read connects when
+// it has no link, and otherwise reads on the held one.
+//
+// A Follower prevents a splice by reconnecting after any failed or cut-off
+// reading: a tail of an earlier reply can exist only on a held connection, so
+// a reading that fails, or that its context cuts off, closes the connection
+// and the next Read makes a new one, with a status link and a notification
+// subscription of its own, which nothing of the old reply can reach. It does
+// not drain the old reply up to the D-Bus sequence boundary instead, because
+// reconnecting is simpler and stronger, and costs one scan and connect per
+// failed reading.
+//
+// BlueZ announces a drop from the other end only through the Connected
+// property of the device. Read reads it before it uses a held connection, and
+// watches it while the reply arrives, so a drop ends the reading at once with
+// an error that matches ErrLinkDropped, not an incomplete reply after the
+// whole timeout. The dead connection is closed, which ends its subscription
+// with its D-Bus connection, and the next Read subscribes afresh, so no
+// subscription is ever made twice on a characteristic and the notifications
+// per reply do not grow.
 package ble
 
 import (

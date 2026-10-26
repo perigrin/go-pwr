@@ -57,7 +57,7 @@ func (f *Follower) Read(ctx context.Context) (string, error) {
 		}
 		f.conn = conn
 	} else if up, err := connected(ctx, f.conn.object); err != nil && !isGone(err) {
-		return "", retryableError(fmt.Errorf("follow read: check the link: %w", err))
+		return "", f.abandoned(fmt.Errorf("check the link: %w", err))
 	} else if err != nil || !up {
 		return "", f.dropped(nil)
 	}
@@ -78,7 +78,7 @@ func (f *Follower) Read(ctx context.Context) (string, error) {
 	if down || f.linkDown() {
 		return "", f.dropped(err)
 	}
-	return "", fmt.Errorf("follow read: %w", err)
+	return "", f.abandoned(err)
 }
 
 // establish scans for the controller and connects to it.
@@ -117,6 +117,24 @@ func (f *Follower) linkDown() bool {
 	defer cancel()
 	up, err := connected(ctx, f.conn.object)
 	return !up && (err == nil || isGone(err))
+}
+
+// abandoned closes the connection of a reading that failed, and returns the
+// reading's error, joined with the close's own error if that failed. The next
+// Read connects again, so nothing of this reading's reply that is still
+// arriving can reach it. This is how a Follower prevents a splice (see the
+// package documentation).
+func (f *Follower) abandoned(cause error) error {
+	conn := f.conn
+	f.conn = nil
+	err := fmt.Errorf("follow read: %w", cause)
+	if closeErr := conn.Close(); closeErr != nil {
+		err = errors.Join(err, closeErr)
+	}
+	if errors.Is(err, ErrRetryable) {
+		return err
+	}
+	return retryableError(err)
 }
 
 // dropped closes the connection whose link went down and returns the error

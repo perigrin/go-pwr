@@ -95,3 +95,58 @@ func TestFollowDetectsDroppedLink(t *testing.T) {
 
 	requireWholeReading(t, readWhole(t, f))
 }
+
+// cutOffReading takes a reading on f whose context ends a short time after
+// the request is written, while its reply is still arriving, and returns its
+// error. A held connection answers within a few hundred milliseconds, so the
+// time to cut is looked for downwards: a reading that completes anyway is
+// whole, and is followed by one cut sooner.
+func cutOffReading(t *testing.T, f *Follower) error {
+	t.Helper()
+	for _, cut := range []time.Duration{200, 100, 60, 40, 25, 15, 10, 5} {
+		cut *= time.Millisecond
+		ctx, cancel := context.WithTimeout(context.Background(), followReadBound)
+		f.conn.afterWrite = func() { time.AfterFunc(cut, cancel) }
+		reply, err := f.Read(ctx)
+		cancel()
+		if f.conn != nil {
+			f.conn.afterWrite = nil
+		}
+		if err != nil {
+			t.Logf("reading cut off %v after the request: %v", cut, err)
+			return err
+		}
+		t.Logf("reading cut %v after the request completed anyway: %d bytes", cut, len(reply))
+	}
+	t.Fatal("no reading could be cut off before its reply completed")
+	return nil
+}
+
+func TestFollowNoSpliceAfterCutOffReading(t *testing.T) {
+	requireHardware(t)
+	f, _ := newFollower(t)
+	drops := &dropRecorder{}
+	f.configure = func(c *Conn) { c.onDrop = drops.record }
+
+	requireWholeReading(t, readWhole(t, f))
+	held := f.conn
+
+	err := cutOffReading(t, f)
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Errorf("cut-off reading error = %v, want the context's error", err)
+	}
+	if errors.Is(err, ErrLinkDropped) {
+		t.Errorf("cut-off reading error = %v, want a cut-off reply, not a dropped link", err)
+	}
+
+	// The tail of the cut-off reply must not reach the next one: it is read on
+	// a connection of its own, made after the cut-off.
+	reply := readWhole(t, f)
+	requireWholeReading(t, reply)
+	if f.conn == held {
+		t.Error("the read after a cut-off reading used the connection the cut-off reply was arriving on")
+	}
+	for _, err := range drops.all() {
+		t.Errorf("notification dropped: %v", err)
+	}
+}

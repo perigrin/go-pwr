@@ -219,8 +219,8 @@ func TestFollowDropMidReply(t *testing.T) {
 	ctl := startBluetoothctl(t)
 
 	requireWholeReading(t, readWhole(t, f))
-	lead, step := 1800*time.Millisecond, 100*time.Millisecond
-	const attempts = 14
+	lead, step := 1800*time.Millisecond, 50*time.Millisecond
+	const attempts = 20
 	for attempt := 1; attempt <= attempts; attempt++ {
 		written := false
 		f.conn.afterWrite = func() { written = true }

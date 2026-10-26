@@ -55,6 +55,9 @@ func followMode(ctx context.Context, cfg config, stdout, stderr io.Writer) int {
 			}
 			return followOnce(ctx, cfg, follower, out, stderr)
 		}) {
+			// Nothing of the failed reading may still be running when the
+			// link is closed.
+			cancel()
 			if follower != nil {
 				closeFollower(follower, stderr)
 			}

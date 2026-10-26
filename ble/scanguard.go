@@ -3,7 +3,10 @@
 
 package ble
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 // libraryNotScanning is the text of the bluetooth library's errNotScanning,
 // which it does not export. StopScan returns it when no scan is running.
@@ -55,4 +58,34 @@ func (g *scanGuard) Stopped() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.stopped
+}
+
+// recoverScan runs scan, which calls the library's Adapter.Scan, and turns a
+// panic inside it into an error. The library panics while it evaluates the
+// callback's argument, in the goroutine that called Scan, so a recover in the
+// callback never runs. And Scan leaves its scan state set and discovery
+// running when it panics, so every later Scan would fail with "a scan is
+// already in progress".
+//
+// After a panic recoverScan resets the library the way it would reset itself:
+// StopScan through the guard, which clears the scan state, then
+// stopDiscovery, which asks BlueZ to stop discovering. It returns an error,
+// so the reading fails and the next one scans afresh. It always ends the
+// guard when scan returns.
+func recoverScan(scan func() error, guard *scanGuard, stopDiscovery func() error) (err error) {
+	defer guard.End()
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		err = fmt.Errorf("scan panicked: %v", r)
+		if stopErr := guard.Stop(); stopErr != nil {
+			err = fmt.Errorf("%w; reset the scan: %v", err, stopErr)
+		}
+		if discErr := stopDiscovery(); discErr != nil {
+			err = fmt.Errorf("%w; stop discovery: %v", err, discErr)
+		}
+	}()
+	return scan()
 }

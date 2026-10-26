@@ -5,6 +5,7 @@ package ble
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -88,5 +89,99 @@ func TestScanGuardOtherErrorsAreReturned(t *testing.T) {
 
 	if err := guard.Stop(); !errors.Is(err, cause) {
 		t.Errorf("Stop() = %v, want %v", err, cause)
+	}
+}
+
+// fakeLibrary behaves like the bluetooth library's Scan on the one point that
+// matters here: Scan marks itself running, and refuses to start while it is
+// marked, until StopScan clears the mark. A hand-built fake is allowed because
+// the library's panic can't be produced on the Mac (owner decision 11); the
+// real library is tested on lola.
+type fakeLibrary struct {
+	running        bool
+	panicNextScan  bool
+	stopScanCalls  int
+	stopDiscCalls  int
+	callOrder      []string
+	discoveringNow bool
+}
+
+var errFakeScanning = errors.New("bluetooth: a scan is already in progress")
+
+func (l *fakeLibrary) scan(callback func(string)) error {
+	if l.running {
+		return errFakeScanning
+	}
+	l.running = true
+	l.discoveringNow = true
+	if l.panicNextScan {
+		// The library asserts props["UUIDs"].Value().([]string) without a
+		// comma-ok while evaluating the callback's argument, outside the
+		// callback's body.
+		var uuids any
+		callback(fmt.Sprint(uuids.([]string)))
+	}
+	l.running = false
+	l.discoveringNow = false
+	return nil
+}
+
+func (l *fakeLibrary) stopScan() error {
+	l.stopScanCalls++
+	l.callOrder = append(l.callOrder, "StopScan")
+	if !l.running {
+		return errors.New(libraryNotScanning)
+	}
+	l.running = false
+	return nil
+}
+
+func (l *fakeLibrary) stopDiscovery() error {
+	l.stopDiscCalls++
+	l.callOrder = append(l.callOrder, "StopDiscovery")
+	l.discoveringNow = false
+	return nil
+}
+
+func TestScanRecoversPanicInScanCall(t *testing.T) {
+	library := &fakeLibrary{panicNextScan: true}
+	callback := func(string) { t.Error("callback body ran, want the panic before it") }
+
+	guard := newScanGuard(library.stopScan)
+	err := recoverScan(func() error { return library.scan(callback) }, guard, library.stopDiscovery)
+	if err == nil {
+		t.Fatal("recoverScan() = nil after a panic, want a scan error")
+	}
+	t.Logf("recoverScan() after a panic = %v", err)
+	if library.stopScanCalls != 1 || library.stopDiscCalls != 1 {
+		t.Errorf("reset hooks: StopScan %d times, StopDiscovery %d times, want 1 and 1", library.stopScanCalls, library.stopDiscCalls)
+	}
+	if got, want := fmt.Sprint(library.callOrder), "[StopScan StopDiscovery]"; got != want {
+		t.Errorf("reset order = %s, want %s", got, want)
+	}
+	if library.running || library.discoveringNow {
+		t.Errorf("after the panic the library is running=%v discovering=%v, want both false", library.running, library.discoveringNow)
+	}
+
+	library.panicNextScan = false
+	guard = newScanGuard(library.stopScan)
+	if err := recoverScan(func() error { return library.scan(callback) }, guard, library.stopDiscovery); err != nil {
+		t.Errorf("second recoverScan() = %v, want nil", err)
+	}
+}
+
+func TestRecoverScanPassesErrorsThrough(t *testing.T) {
+	cause := errors.New("adapter not powered")
+	library := &fakeLibrary{}
+	guard := newScanGuard(library.stopScan)
+	err := recoverScan(func() error { return cause }, guard, library.stopDiscovery)
+	if !errors.Is(err, cause) {
+		t.Errorf("recoverScan() = %v, want %v", err, cause)
+	}
+	if library.stopDiscCalls != 0 || library.stopScanCalls != 0 {
+		t.Errorf("reset hooks ran without a panic: StopScan %d, StopDiscovery %d", library.stopScanCalls, library.stopDiscCalls)
+	}
+	if !guard.Stopped() {
+		t.Error("guard not ended after the scan returned")
 	}
 }

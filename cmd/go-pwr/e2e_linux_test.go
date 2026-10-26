@@ -279,3 +279,93 @@ func TestOneShotWithLeftoverLink(t *testing.T) {
 	}
 	requireLinkDown(t, mac)
 }
+
+func TestOneShotAbsentMacExit1(t *testing.T) {
+	requireHardware(t)
+	const absent = "00:11:22:33:44:55"
+	const timeout = 12 * time.Second
+	r, took := runGoPwr(t, "--mac", absent, "--timeout", timeout.String())
+	if r.status != 1 || r.stdout != "" {
+		t.Errorf("status %d, stdout %q, want 1 and nothing", r.status, r.stdout)
+	}
+	if strings.Count(r.stderr, "\n") != 1 || !strings.Contains(r.stderr, "not found") {
+		t.Errorf("stderr %q, want one line saying the controller was not found", r.stderr)
+	}
+	if took > timeout+3*time.Second {
+		t.Errorf("took %v, want within --timeout %v plus 3 s", took, timeout)
+	}
+}
+
+func TestOneShotTimeoutExit1Disconnects(t *testing.T) {
+	mac := requireHardware(t)
+	// A reading takes at least 2.8 s on lola, and about 6 s from a cold
+	// start. 1 s ends in the scan and 3 s usually in the connect, with a link
+	// to drop.
+	for _, timeout := range []time.Duration{time.Second, 3 * time.Second} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			r, took := runGoPwr(t, "--mac", mac, "--timeout", timeout.String())
+			if r.status == 0 {
+				t.Skipf("the reading took less than %v this time", timeout)
+			}
+			if r.status != 1 || r.stdout != "" {
+				t.Errorf("status %d, stdout %q, want 1 and nothing", r.status, r.stdout)
+			}
+			if strings.Count(r.stderr, "\n") != 1 {
+				t.Errorf("stderr %q, want one line", r.stderr)
+			}
+			// Cleaning up an abandoned connect can take up to 10 s past the deadline.
+			if took > timeout+12*time.Second {
+				t.Errorf("took %v, want within --timeout plus the 10 s disconnect bound", took)
+			}
+			requireLinkDown(t, mac)
+		})
+	}
+}
+
+func TestOneShotSIGTERMExit1(t *testing.T) {
+	mac := requireHardware(t)
+	for _, delay := range interruptDelays {
+		t.Run(delay.String(), func(t *testing.T) {
+			r, _ := interrupt(t, syscall.SIGTERM, delay, "--mac", mac)
+			if r.status != 1 || r.stdout != "" {
+				t.Errorf("status %d, stdout %q, want 1 and nothing", r.status, r.stdout)
+			}
+			requireLinkDown(t, mac)
+		})
+	}
+}
+
+// wantOnlyJSONObjects fails the test unless every line of stdout is one
+// complete JSON object.
+func wantOnlyJSONObjects(t *testing.T, stdout string) {
+	t.Helper()
+	if stdout != "" && !strings.HasSuffix(stdout, "\n") {
+		t.Errorf("stdout %q does not end in a newline", stdout)
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(stdout, "\n"), "\n") {
+		var object map[string]any
+		if err := json.Unmarshal([]byte(line), &object); err != nil || object == nil {
+			t.Errorf("stdout line %q is not a JSON object: %v", line, err)
+		}
+	}
+}
+
+func TestOneShotStdoutOnlyReadings(t *testing.T) {
+	mac := requireHardware(t)
+
+	r, _ := runGoPwr(t, "--mac", mac, "--format", "json")
+	if r.status != 0 || strings.Count(r.stdout, "\n") != 1 {
+		t.Fatalf("status %d, stdout %q, want 0 and one line", r.status, r.stdout)
+	}
+	wantOnlyJSONObjects(t, r.stdout)
+	for _, line := range strings.Split(r.stderr, "\n") {
+		if strings.Contains(r.stdout, line) && line != "" {
+			t.Errorf("stderr line %q also reached stdout", line)
+		}
+	}
+
+	failed, _ := runGoPwr(t, "--mac", mac, "--format", "json", "--timeout=1s")
+	if failed.status != 1 || failed.stdout != "" || failed.stderr == "" {
+		t.Errorf("failed run: status %d, stdout %q, stderr %q, want 1, nothing, an error on stderr", failed.status, failed.stdout, failed.stderr)
+	}
+}

@@ -32,10 +32,3 @@ func realMain(args []string, stdout, stderr io.Writer) int {
 	}
 	return run(cfg, stdout, stderr)
 }
-
-// run is a placeholder until the one-shot reading is implemented. It makes no
-// Bluetooth call.
-func run(cfg config, stdout, stderr io.Writer) int {
-	fmt.Fprintln(stderr, "go-pwr: reading is not implemented")
-	return 1
-}

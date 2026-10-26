@@ -4,6 +4,7 @@
 package status
 
 import (
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -202,5 +203,156 @@ func TestDecodeCapturedReply(t *testing.T) {
 	}
 	if len(r.FieldErrors) != 0 {
 		t.Errorf("FieldErrors = %v, want none", r.FieldErrors)
+	}
+}
+
+// fieldsByIndex returns the decoded nullable field for each non-gating
+// index, so a test can check exactly which ones are null.
+func fieldsByIndex(r Reading) map[int]*int {
+	return map[int]*int{
+		indexBatteryType: r.BatteryType,
+		indexChargeState: r.ChargeState,
+		indexTempC:       r.TempC,
+		indexTempF:       r.TempF,
+		indexAhToday:     r.AhToday,
+		indexAhYesterday: r.AhYesterday,
+		indexAh2d:        r.Ah2d,
+		indexAh3d:        r.Ah3d,
+		indexAh7d:        r.Ah7d,
+	}
+}
+
+// wantOnlyNull checks that exactly the fields at nullIndexes are null, each
+// with its own FieldError, and that the gating values are the capture's.
+func wantOnlyNull(t *testing.T, reply string, nullIndexes ...int) Reading {
+	t.Helper()
+	r, err := Decode(reply)
+	if err != nil {
+		t.Fatalf("Decode(%q): %v, want a reading", reply, err)
+	}
+	isNull := map[int]bool{}
+	for _, i := range nullIndexes {
+		isNull[i] = true
+	}
+	for i, v := range fieldsByIndex(r) {
+		if isNull[i] && v != nil {
+			t.Errorf("field %d = %d, want null", i, *v)
+		}
+		if !isNull[i] && v == nil {
+			t.Errorf("field %d is null, want a value", i)
+		}
+	}
+	if len(r.FieldErrors) != len(nullIndexes) {
+		t.Errorf("FieldErrors = %v, want %d", r.FieldErrors, len(nullIndexes))
+	}
+	for _, e := range r.FieldErrors {
+		var fe *FieldError
+		if !errors.As(e, &fe) || !isNull[fe.Index] {
+			t.Errorf("field error %v is not for a null field", e)
+		}
+	}
+	if r.ChargeMA != 655 || r.BatteryMV != 13244 || r.SolarMV != 22879 {
+		t.Errorf("gating values changed: %d mA, %d mV, %d mV", r.ChargeMA, r.BatteryMV, r.SolarMV)
+	}
+	if r.Raw != reply {
+		t.Errorf("Raw = %q, want %q", r.Raw, reply)
+	}
+	return r
+}
+
+func TestDecodeNullForFailedFields(t *testing.T) {
+	for _, i := range []int{indexTempC, indexTempF, indexAhToday, indexAh7d, indexBatteryType, indexChargeState} {
+		wantOnlyNull(t, alteredReply(t, i, "x"), i)
+	}
+}
+
+func TestDecodeHexAmpHoursIsNull(t *testing.T) {
+	reply := alteredReply(t, indexAhToday, "0000A")
+	wantOnlyNull(t, reply, indexAhToday)
+	if !strings.Contains(reply, ";0000A;") {
+		t.Fatalf("altered reply %q lost 0000A", reply)
+	}
+}
+
+func TestDecodeLeadingZerosAreDecimal(t *testing.T) {
+	for _, c := range []struct {
+		index int
+		value string
+		want  int
+	}{
+		{indexBatteryType, "008", 8},
+		{indexChargeState, "009", 9},
+		{indexAhToday, "00008", 8},
+		{indexAh7d, "00009", 9},
+	} {
+		r := wantOnlyNull(t, alteredReply(t, c.index, c.value))
+		wantInt(t, c.value, fieldsByIndex(r)[c.index], c.want)
+	}
+}
+
+func TestDecodeSignedAndThreeDigitTemps(t *testing.T) {
+	for _, c := range []struct {
+		c, f         string
+		wantC, wantF int
+	}{
+		{"-05", "+23", -5, 23},
+		{"-40", "-40", -40, -40},
+		{"+38", "+100", 38, 100},
+	} {
+		reply := alteredReply(t, indexTempC, c.c)
+		fields := strings.Split(reply, ";")
+		fields[indexTempF] = c.f
+		r := wantOnlyNull(t, strings.Join(fields, ";"))
+		wantInt(t, "TempC", r.TempC, c.wantC)
+		wantInt(t, "TempF", r.TempF, c.wantF)
+	}
+	for _, v := range []string{"+", "-", "+-5", "--5"} {
+		wantOnlyNull(t, alteredReply(t, indexTempF, v), indexTempF)
+	}
+}
+
+func TestDecodeMultipleFailedFieldsEachReported(t *testing.T) {
+	fields := strings.Split(capturedReply(t), ";")
+	for _, i := range []int{indexBatteryType, indexTempC, indexAhYesterday, indexAh3d} {
+		fields[i] = "?"
+	}
+	wantOnlyNull(t, strings.Join(fields, ";"), indexBatteryType, indexTempC, indexAhYesterday, indexAh3d)
+}
+
+func TestDecodeIgnoresIndex10(t *testing.T) {
+	r := wantOnlyNull(t, alteredReply(t, 10, "not a number"))
+	want, err := Decode(capturedReply(t))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	for i, v := range fieldsByIndex(r) {
+		if *v != *fieldsByIndex(want)[i] {
+			t.Errorf("field %d = %d, want %d", i, *v, *fieldsByIndex(want)[i])
+		}
+	}
+}
+
+// TestDecodeOutOfTableCodes pins how codes outside both tables decode:
+// an unsigned number is kept with the name unknown, and a signed value,
+// which the code fields' unsigned format can't carry, is null.
+func TestDecodeOutOfTableCodes(t *testing.T) {
+	for _, c := range []struct {
+		index int
+		value string
+		want  int
+	}{
+		{indexChargeState, "008", 8},
+		{indexChargeState, "255", 255},
+		{indexBatteryType, "008", 8},
+		{indexBatteryType, "255", 255},
+	} {
+		r := wantOnlyNull(t, alteredReply(t, c.index, c.value))
+		wantInt(t, c.value, fieldsByIndex(r)[c.index], c.want)
+	}
+	if ChargeStateName(255) != "unknown" || BatteryTypeName(8) != "unknown" {
+		t.Errorf("an unlisted code is not named unknown")
+	}
+	for _, i := range []int{indexChargeState, indexBatteryType} {
+		wantOnlyNull(t, alteredReply(t, i, "-01"), i)
 	}
 }

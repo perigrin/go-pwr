@@ -21,10 +21,18 @@ ssh lola "cd go-pwr-test && env GO_PWR_TEST_MAC=C3:00:00:58:51:40 ./ble.test -te
 The same pattern, `GOOS=linux GOARCH=arm GOARM=6 go test -c -trimpath -buildvcs=false -o <pkg>.test ./<pkg>` then `./<pkg>.test -test.count=1` on lola, works for every package. `-trimpath -buildvcs=false` makes the binary reproducible, so a binary on lola can be checked against a fresh cross-compile by SHA-256.
 
 - Tests that talk to the controller are skipped unless `GO_PWR_TEST_MAC` is set, on lola, to the controller's address. Tests that only need Linux, such as `internal/boot`, run without it.
-- Tests that need root run with `ssh lola "cd go-pwr-test && sudo -n ./<pkg>.test …"`.
-- lola takes one ssh session at a time, so run one test binary at a time.
+- Tests that need root run with `ssh lola "cd go-pwr-test && sudo -n env GO_PWR_TEST_MAC=… ./ble.test …"`. `env` keeps `GO_PWR_TEST_MAC` through `sudo`, and `-n` means sudo never prompts. The `ble` tests that need root block the adapter with `rfkill`, power it off, unbind hci0 from `hci_uart_bcm`, mask and stop BlueZ, and install a deny drop-in for `nobody` in `/etc/dbus-1/system.d/`. Each restores what it changed in a `;`-joined `t.Cleanup`, so a failed step doesn't stop the rest.
+- lola takes one ssh session at a time, so run one test binary at a time, and one ssh command at a time. lola refused ssh sessions with `resources` errors when nine hit it at once.
 - The controller appears to accept only one connection at a time, so first close the Go Power! Connect app and stop any `go-pwr` process that owns the controller (on lola, the poller feeding the shutdown script).
 - Every test that changes lola's state restores it, even when it fails. `TestUptimeIgnoresWallClockStep` steps the wall clock with `systemd-timesyncd` stopped; if it is killed before its cleanup runs, restore the clock with `ssh lola 'sudo -n systemctl start systemd-timesyncd; sudo -n timedatectl set-ntp true'`.
+
+A test killed before its cleanup runs (a `-test.timeout` panic, a dropped ssh session, SIGKILL) can leave lola with BlueZ masked, the adapter blocked or unbound, or the deny drop-in installed. Restore it by hand:
+
+```
+ssh lola 'sudo -n systemctl unmask --runtime bluetooth.service; sudo -n rfkill unblock bluetooth; test -e /sys/bus/serial/drivers/hci_uart_bcm/serial0-0 || echo serial0-0 | sudo -n tee /sys/bus/serial/drivers/hci_uart_bcm/bind; sudo -n rm -f /etc/dbus-1/system.d/zz-go-pwr-test-deny.conf; sudo -n systemctl reload dbus; sudo -n systemctl start bluetooth; sudo -n systemctl start systemd-timesyncd; bluetoothctl power on'
+```
+
+Then check that lola is as it was: bluetooth active and not masked, `/sys/class/bluetooth/hci0` present, `bluetoothctl show` says `Powered: yes`, `/usr/sbin/rfkill list bluetooth` blocks nothing (plain `rfkill` is not on the ssh user's PATH), and `/etc/dbus-1/system.d/zz-go-pwr-test-deny.conf` is gone.
 
 ## Branching
 

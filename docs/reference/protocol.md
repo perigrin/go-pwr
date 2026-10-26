@@ -32,6 +32,19 @@ A `0000ffe1-…` service is also present. The app doesn't use it for this contro
 - **What has been observed to work:** in one test, a plain connection with no bond, notifications on `FFF1` only, and an immediate request returned a full reply.
 - The controller appears to allow **one connection at a time**. While the phone app was connected, other connection attempts failed. That was observed once.
 
+## BlueZ errors observed on lola
+
+Measured on lola (Raspberry Pi Zero W, BlueZ, Open reading `org.bluez.Adapter1.Powered` on `/org/bluez/hci0` over the system bus). The `ble` package tells these apart by D-Bus error name with `errors.As`, never by message text.
+
+| Condition | D-Bus error name | Notes |
+|---|---|---|
+| hci0 unbound from `hci_uart_bcm` `serial0-0` (no adapter, or the adapter vanished) | `org.freedesktop.DBus.Error.UnknownObject` | The message says `Method "Get" ... doesn't exist`. |
+| BlueZ stopped by `systemctl mask --runtime bluetooth.service` then `stop` | `org.freedesktop.DBus.Error.FileExists` | The message says `Unit dbus-org.bluez.service failed to load properly ... File exists`. It arrives about 15 seconds after the call, not at once. It is not `ServiceUnknown`: BlueZ is D-Bus activated through the `dbus-org.bluez.service` alias, so a plain `stop` is undone by the next call, and masking the real unit makes the activation fail with this name. `ServiceUnknown` and `NameHasNoOwner` are classified as not running too, but were not seen. |
+| `nobody` under a bus policy that denies `send_destination="org.bluez"` | `org.freedesktop.DBus.Error.AccessDenied` | The message starts `Rejected send message, 3 matched rules`. |
+| Adapter powered off (`bluetoothctl power off`) or soft-blocked (`rfkill block bluetooth`) | none | The adapter stays on the bus with `Powered` false. Powered off and blocked look the same to `Open`. |
+
+The bluetooth library hard-codes `hci0`. If an adapter reset brought the adapter back as `hci1`, retries would fail until the program restarts. That is unlikely, because Linux reuses the lowest free index; unbinding and rebinding the driver on lola brought it back as `hci0`.
+
 ## Status request
 
 1. Enable notifications on `FFF1`.

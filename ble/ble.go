@@ -25,6 +25,20 @@
 // reading. The same conditions after Open has succeeded match ErrRetryable
 // instead: they are an ordinary failed reading, retried on the next poll.
 // The underlying D-Bus error stays reachable with errors.As.
+//
+// On Linux, Open classifies by D-Bus error name, as observed on lola (see
+// docs/reference/protocol.md): org.freedesktop.DBus.Error.UnknownObject is
+// ErrNoAdapter; org.freedesktop.DBus.Error.AccessDenied is ErrAccessDenied;
+// org.freedesktop.DBus.Error.FileExists, which D-Bus returns when
+// bluetooth.service is masked and stopped, is ErrBlueZNotRunning (as are
+// ServiceUnknown, NameHasNoOwner and the Spawn errors, which were not
+// seen); and an adapter that is on the bus with Powered false is
+// ErrAdapterUnavailable. Open never powers on or unblocks the adapter.
+//
+// The bluetooth library hard-codes the adapter name hci0. If an adapter
+// reset brought the adapter back as hci1, every retry would fail until the
+// program restarts. That is unlikely, because Linux reuses the lowest free
+// index.
 package ble
 
 import (

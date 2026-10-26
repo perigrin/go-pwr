@@ -5,6 +5,7 @@ package ble
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -245,5 +246,131 @@ func TestAdapterUnboundAfterOpenIsRetryable(t *testing.T) {
 	}
 	if err := adapter.Check(); err != nil {
 		t.Errorf("Check() after rebinding hci0 = %v, want nil", err)
+	}
+}
+
+// rfkillBlocked reports whether rfkill soft-blocks Bluetooth.
+func rfkillBlocked(t *testing.T) bool {
+	t.Helper()
+	return strings.Contains(sh(t, "rfkill list bluetooth"), "Soft blocked: yes")
+}
+
+func TestOpenAdapterPoweredOff(t *testing.T) {
+	requireRoot(t)
+	restoreOnCleanup(t)
+	sh(t, "bluetoothctl power off")
+	if rfkillBlocked(t) {
+		t.Fatal("adapter is blocked, want it powered off only")
+	}
+
+	_, err := Open()
+	t.Logf("Open() with the adapter powered off = %v", err)
+	if !errors.Is(err, ErrAdapterUnavailable) || !errors.Is(err, ErrFatalAtStartup) {
+		t.Errorf("Open() error = %v, want ErrAdapterUnavailable and ErrFatalAtStartup", err)
+	}
+}
+
+func TestOpenDoesNotPowerAdapter(t *testing.T) {
+	requireRoot(t)
+	restoreOnCleanup(t)
+
+	sh(t, "bluetoothctl power off")
+	if _, err := Open(); err == nil {
+		t.Error("Open() with the adapter powered off succeeded, want an error")
+	}
+	if strings.Contains(sh(t, "bluetoothctl show"), "Powered: yes") {
+		t.Error("adapter is powered after a failed Open, want it still off")
+	}
+
+	sh(t, "rfkill block bluetooth")
+	if _, err := Open(); err == nil {
+		t.Error("Open() with the adapter blocked succeeded, want an error")
+	}
+	if !rfkillBlocked(t) {
+		t.Error("adapter is unblocked after a failed Open, want it still blocked")
+	}
+	if strings.Contains(sh(t, "bluetoothctl show"), "Powered: yes") {
+		t.Error("adapter is powered after a failed Open, want it still off")
+	}
+}
+
+func TestAdapterLossAfterOpenIsRetryable(t *testing.T) {
+	requireRoot(t)
+	restoreOnCleanup(t)
+	adapter, err := Open()
+	if err != nil {
+		t.Fatalf("Open() error = %v, want nil", err)
+	}
+	retryable := func(t *testing.T, class error) {
+		t.Helper()
+		err := adapter.Check()
+		t.Logf("Check() = %v", err)
+		if !errors.Is(err, ErrRetryable) || !errors.Is(err, class) {
+			t.Errorf("Check() error = %v, want ErrRetryable and %v", err, class)
+		}
+		if errors.Is(err, ErrFatalAtStartup) {
+			t.Errorf("Check() error = %v, must not be fatal at startup", err)
+		}
+	}
+
+	sh(t, "rfkill block bluetooth")
+	time.Sleep(time.Second)
+	retryable(t, ErrAdapterUnavailable)
+	sh(t, "rfkill unblock bluetooth")
+	if !waitPowered(t) {
+		t.Fatal("adapter not powered 30s after unblocking it")
+	}
+	if err := adapter.Check(); err != nil {
+		t.Errorf("Check() after unblocking = %v, want nil", err)
+	}
+
+	stopBlueZ(t)
+	retryable(t, ErrBlueZNotRunning)
+	sh(t, "systemctl unmask --runtime bluetooth.service; systemctl start bluetooth")
+	if !waitPowered(t) {
+		t.Fatal("adapter not powered 30s after restarting BlueZ")
+	}
+	if err := adapter.Check(); err != nil {
+		t.Errorf("Check() after restarting BlueZ = %v, want nil", err)
+	}
+}
+
+func TestOpenErrorClassesAreTyped(t *testing.T) {
+	requireRoot(t)
+	restoreOnCleanup(t)
+	classes := []error{ErrNoAdapter, ErrAccessDenied, ErrBlueZNotRunning, ErrAdapterUnavailable}
+
+	for _, tc := range []struct {
+		name   string
+		cause  func(t *testing.T)
+		want   error
+		revert string
+	}{
+		{"powered off", func(t *testing.T) { sh(t, "bluetoothctl power off") }, ErrAdapterUnavailable, "bluetoothctl power on"},
+		{"blocked", func(t *testing.T) { sh(t, "rfkill block bluetooth"); time.Sleep(time.Second) }, ErrAdapterUnavailable, "rfkill unblock bluetooth"},
+		{"BlueZ stopped", stopBlueZ, ErrBlueZNotRunning, "systemctl unmask --runtime bluetooth.service; systemctl start bluetooth"},
+		{"adapter unbound", unbindAdapter, ErrNoAdapter, "echo serial0-0 | tee /sys/bus/serial/drivers/hci_uart_bcm/bind"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.cause(t)
+			_, err := Open()
+			wrapped := fmt.Errorf("start up: %w", err)
+			for _, class := range classes {
+				if got, want := errors.Is(wrapped, class), class == tc.want; got != want {
+					t.Errorf("errors.Is(%q, %v) = %v, want %v", wrapped, class, got, want)
+				}
+			}
+			if !errors.Is(wrapped, ErrFatalAtStartup) {
+				t.Errorf("errors.Is(%q, ErrFatalAtStartup) = false, want true", wrapped)
+			}
+			var dbusErr dbus.Error
+			if tc.want != ErrAdapterUnavailable && !errors.As(wrapped, &dbusErr) {
+				t.Errorf("errors.As(%q, dbus.Error) = false, want the D-Bus error", wrapped)
+			}
+			sh(t, tc.revert)
+			if !waitPowered(t) {
+				t.Fatalf("adapter not powered 30s after reverting %s", tc.name)
+			}
+		})
 	}
 }

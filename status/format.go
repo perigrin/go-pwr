@@ -96,7 +96,13 @@ func WriteJSONLine(w io.Writer, rec Record) error {
 // two-decimal value, which encoding/json prints in its shortest form: no
 // artefacts, and no trailing zeros (13200 mV is 13.2).
 func hundredths(milli int) float64 {
-	return float64((milli+5)/10) / 100
+	return float64(wholeHundredths(milli)) / 100
+}
+
+// wholeHundredths converts a milli-unit count to a whole number of
+// hundredths of a unit, rounding half up.
+func wholeHundredths(milli int) int {
+	return (milli + 5) / 10
 }
 
 // codeNameOrNil names a code with name, or gives nil when the code failed

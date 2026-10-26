@@ -10,9 +10,9 @@ import (
 
 // A complete reply needs no timer: its CRLF marks it whole (see Assembler).
 // The timing below only decides when to give up on a reply that is cut off
-// or silent. Each limit is the longest value seen in the 21 replies captured
-// on lola (protocol.md, "Completion timing") times TimingMargin, rounded up
-// to a whole number of seconds or half seconds.
+// or silent. Each limit is at least TimingMargin times the longest value seen
+// in the 21 replies captured on lola (protocol.md, "Completion timing"); each
+// constant says what it was set to and why.
 const (
 	// TimingMargin is the least factor by which a limit must exceed the
 	// longest measured value. The capture is one night, one adapter and one
@@ -21,15 +21,20 @@ const (
 	TimingMargin = 10
 
 	// FirstNotificationTimeout is how long after the request the first
-	// notification may take. Measured longest: 96 ms (x10 = 960 ms).
+	// notification may take. Measured longest: 96 ms. Set to 2 s, about 21x,
+	// to match the Go Power! app's own 2000 ms give-up (protocol.md, Status
+	// request), the longest wait the controller is known to be used with.
 	FirstNotificationTimeout = 2 * time.Second
 
 	// GapTimeout is how long a reply may go quiet between two notifications.
-	// Measured longest: 88 ms (x10 = 880 ms).
+	// Measured longest: 88 ms. Set to 1 s, about 11x, the smallest whole
+	// second at or above TimingMargin times the longest gap.
 	GapTimeout = 1 * time.Second
 
 	// TotalTimeout is how long after the request a reply may take to
-	// complete. Measured longest: 202 ms (x10 = 2.02 s).
+	// complete. Measured longest: 202 ms. Set to 3 s, about 15x: the smallest
+	// whole second at or above TimingMargin times the longest reply, and long
+	// enough to hold the full FirstNotificationTimeout plus a GapTimeout.
 	TotalTimeout = 3 * time.Second
 )
 

@@ -5,14 +5,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/perigrin/go-pwr/ble"
 )
 
 // requireHardware skips the test unless GO_PWR_TEST_MAC names the controller,
@@ -157,6 +161,121 @@ func TestOneShotDisconnects(t *testing.T) {
 	r, _ := runGoPwr(t, "--mac", mac)
 	if r.status != 0 {
 		t.Fatalf("status %d, want 0", r.status)
+	}
+	requireLinkDown(t, mac)
+}
+
+// scanFor scans for the controller with the address mac, or for every
+// controller when mac is empty.
+func scanFor(t *testing.T, adapter *ble.Adapter, mac string) []ble.Controller {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	found, err := adapter.Scan(ctx, mac)
+	if err != nil {
+		t.Fatalf("scan for %q: %v", mac, err)
+	}
+	return found
+}
+
+func TestOneShotWithoutMac(t *testing.T) {
+	mac := requireHardware(t)
+	adapter, err := ble.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range scanFor(t, adapter, "") {
+		if c.Address != mac {
+			t.Fatalf("a second GP-PWM-30-SB is in range: %s (the test controller is %s); move it away", c.Address, mac)
+		}
+	}
+	// Without --mac the whole 8 s scan window runs, so the reading can need
+	// more than the 20 s default (owner decision 13).
+	r, _ := runGoPwr(t, "--timeout=60s")
+	if r.status != 0 {
+		t.Fatalf("status %d, want 0", r.status)
+	}
+	if !strings.Contains(r.stdout, mac) {
+		t.Errorf("stdout does not show the controller's address %s:\n%s", mac, r.stdout)
+	}
+	requireLinkDown(t, mac)
+}
+
+// interrupt starts go-pwr with args, sends it sig after delay, and returns
+// its result once it has exited.
+func interrupt(t *testing.T, sig syscall.Signal, delay time.Duration, args ...string) (r result, took time.Duration) {
+	t.Helper()
+	cmd, stdout, stderr := goPwr(t, args...)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	select {
+	case err := <-exited:
+		t.Fatalf("go-pwr exited by itself within %v: %v\nstdout:\n%sstderr:\n%s", delay, err, stdout, stderr)
+	case <-time.After(delay):
+	}
+	if err := cmd.Process.Signal(sig); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	select {
+	case err = <-exited:
+	case <-time.After(45 * time.Second):
+		cmd.Process.Kill()
+		t.Fatalf("go-pwr still running 45s after %v\nstdout:\n%sstderr:\n%s", sig, stdout, stderr)
+	}
+	took = time.Since(start)
+	status := 0
+	var exit *exec.ExitError
+	switch {
+	case errors.As(err, &exit):
+		status = exit.ExitCode()
+	case err != nil:
+		t.Fatal(err)
+	}
+	t.Logf("go-pwr %s, %v after %v: status %d after %v\nstdout:\n%sstderr:\n%s", joinArgs(args), sig, delay, status, took, stdout, stderr)
+	return result{status, stdout.String(), stderr.String()}, took
+}
+
+// interruptDelays are when a signal arrives: during the scan, and later,
+// during the connect or the request. A reading takes at least 2.8 s on lola,
+// so neither is after the reading.
+var interruptDelays = []time.Duration{500 * time.Millisecond, 2 * time.Second}
+
+func TestOneShotInterruptedExit1(t *testing.T) {
+	mac := requireHardware(t)
+	for _, delay := range interruptDelays {
+		t.Run(delay.String(), func(t *testing.T) {
+			r, _ := interrupt(t, syscall.SIGINT, delay, "--mac", mac)
+			if r.status != 1 || r.stdout != "" {
+				t.Errorf("status %d, stdout %q, want 1 and nothing", r.status, r.stdout)
+			}
+			requireLinkDown(t, mac)
+		})
+	}
+}
+
+func TestOneShotWithLeftoverLink(t *testing.T) {
+	mac := requireHardware(t)
+	adapter, err := ble.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanFor(t, adapter, mac)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	leftover, err := adapter.Connect(ctx, mac)
+	if err != nil {
+		t.Fatalf("make the leftover link: %v", err)
+	}
+	t.Cleanup(func() { leftover.Close() })
+
+	r, _ := runGoPwr(t, "--mac", mac, "--format", "json")
+	if r.status != 0 || !strings.Contains(r.stdout, `"device":"`+mac+`"`) {
+		t.Errorf("status %d, stdout %q, want 0 and a reading", r.status, r.stdout)
 	}
 	requireLinkDown(t, mac)
 }

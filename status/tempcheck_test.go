@@ -3,7 +3,10 @@
 
 package status
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 // A rounding mode turns the exact fraction n/d (d > 0) into a whole degree.
 type roundingMode struct {
@@ -83,5 +86,48 @@ func TestTempToleranceCoversRoundingAndTruncation(t *testing.T) {
 	// The −0.99 °C case from the protocol notes: °C truncated to 0, °F to 30.
 	if g := tempGapFifths(0, 30); g > tempToleranceFifths {
 		t.Errorf("0 °C / 30 °F gap %d/5 °F exceeds tolerance %d/5", g, tempToleranceFifths)
+	}
+}
+
+// tempWarnings returns the temperature warnings on r, failing the test on
+// any warning that is not one.
+func tempWarnings(t *testing.T, r Reading) []*TempMismatchWarning {
+	t.Helper()
+	var ws []*TempMismatchWarning
+	for _, w := range r.Warnings {
+		var tw *TempMismatchWarning
+		if !errors.As(w, &tw) || !errors.Is(w, ErrTempMismatch) {
+			t.Errorf("unexpected warning %v", w)
+			continue
+		}
+		ws = append(ws, tw)
+	}
+	return ws
+}
+
+func TestTempCheckCapturedReplyNoWarning(t *testing.T) {
+	r, err := Decode(capturedReply(t))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(r.Warnings) != 0 {
+		t.Errorf("real capture gave warnings: %v", r.Warnings)
+	}
+}
+
+func TestTempMismatchWarnsOnly(t *testing.T) {
+	r, err := Decode(alteredReply(t, indexTempF, "+80"))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	ws := tempWarnings(t, r)
+	if len(ws) != 1 {
+		t.Fatalf("got %d warnings %v, want 1", len(r.Warnings), r.Warnings)
+	}
+	if ws[0].TempC != 22 || ws[0].TempF != 80 {
+		t.Errorf("warning = %+v, want 22 °C / 80 °F", ws[0])
+	}
+	if r.TempF == nil || *r.TempF != 80 || r.ChargeMA != 655 {
+		t.Errorf("reading not returned intact: %+v", r)
 	}
 }

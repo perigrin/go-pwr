@@ -121,6 +121,23 @@ Only three fields can fail a reading on their values: charge current (index 0), 
 
 A sign of either kind, an empty field, embedded spaces, hexadecimal or non-ASCII digits, or more than five digits fail the reading.
 
+### °C/°F check
+
+When both temperature fields (indices 16 and 17) decode, the reported °F must lie within **2.6 °F** of 9/5 × reported °C + 32. A larger gap adds a warning to the reading, and the reading is still returned unchanged. The check is skipped when either field is null.
+
+The controller reports each temperature as a whole number, and which way it rounds or truncates is not known. The tolerance comes from sweeping every true temperature from −40 to +60 °C in 0.01 °C steps, with °C and °F each independently half-up, half-even, half-away, truncated toward zero or floored. The worst gap over the whole sweep is 2.6 °F, so the tolerance is exactly that:
+
+| Gap | Case |
+|---|---|
+| 2.6 °F | True −38.99 °C (−38.18 °F). °C truncated toward zero gives −38 (expected −36.4 °F) and °F floored gives −39. This is the worst mix: both truncating. |
+| 2.0 °F | True −0.99 °C (30.2 °F). °C truncated to `0` (expected 32 °F) and °F truncated to `30`. The worst case at freezing. |
+| 1.4 °F | The worst gap when both fields are rounded, in any of the three rounding modes. |
+| 0.4 °F | The real capture: `+22` °C and `+72` °F against an expected 71.6 °F. |
+
+5 × °F − (9 × °C + 160) is always a whole number, so the code compares it as an integer against 13 (2.6 × 5) with no float rounding. "At the tolerance" means a gap of exactly 2.6 °F, which some °C values can reach (22 °C with 69 °F, 3 °C with 40 °F); that gives no warning, and any larger gap does.
+
+**The check only warns for now.** It has not been confirmed against the cold and hot captures, which are still to be taken (decision 0001). Making it fail readings is a separate, later change.
+
 ## Other writes: do not send
 
 `FFF2` is the input to a serial bridge. The app's other commands are ASCII strings sent **one character per write**, so the controller is parsing a character stream. That makes any stray byte on `FFF2` potentially part of a command. A monitoring client should write only the single byte `0x20`.

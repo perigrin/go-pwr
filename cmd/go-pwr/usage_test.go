@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -96,5 +97,29 @@ func TestUsageErrorsExit2(t *testing.T) {
 		{"--no-such-flag"},
 	} {
 		t.Run(joinArgs(args), func(t *testing.T) { wantUsageError(t, args...) })
+	}
+}
+
+// wantMacRequired checks the missing --mac contract: exit 1, nothing on
+// stdout, an error naming --mac on stderr.
+func wantMacRequired(t *testing.T, args ...string) {
+	t.Helper()
+	r := runBinary(t, args...)
+	if r.status != 1 || r.stdout != "" || !strings.Contains(r.stderr, "--mac") {
+		t.Errorf("go-pwr %q: status %d, stdout %q, stderr %q; want status 1, empty stdout, stderr naming --mac",
+			args, r.status, r.stdout, r.stderr)
+	}
+}
+
+func TestMacRequiredForMachineModes(t *testing.T) {
+	for _, args := range [][]string{
+		{"--format", "json"},
+		{"--format=json"},
+		{"--poll"},
+		{"--poll=10s"},
+		{"--follow"},
+		{"--follow=2s"},
+	} {
+		t.Run(joinArgs(args), func(t *testing.T) { wantMacRequired(t, args...) })
 	}
 }

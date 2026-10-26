@@ -128,3 +128,9 @@ func (c config) validate(positional int) error {
 	}
 	return nil
 }
+
+// machineMode reports whether the output is meant for a script: JSON or a
+// continuous mode. These refuse to run without --mac.
+func (c config) machineMode() bool {
+	return c.format == "json" || c.poll > 0 || c.follow > 0
+}

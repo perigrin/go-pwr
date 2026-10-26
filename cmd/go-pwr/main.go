@@ -25,6 +25,11 @@ func realMain(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return 2
 	}
+	// Not a usage error: the command line is valid, it just can't run.
+	if cfg.mac == "" && cfg.machineMode() {
+		fmt.Fprintln(stderr, "go-pwr: --mac is required with --format json, --poll or --follow")
+		return 1
+	}
 	return run(cfg, stdout, stderr)
 }
 

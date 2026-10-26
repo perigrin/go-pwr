@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,39 +52,39 @@ func oneShot(ctx context.Context, cfg config, stdout, stderr io.Writer) (code in
 	}()
 	adapter, err := ble.Open()
 	if err != nil {
-		io.WriteString(stderr, status.ErrorLine(err))
+		printError(stderr, err)
 		return 1
 	}
 	ctx, cancel := context.WithTimeout(ctx, cfg.timeout)
 	defer cancel()
 	found, err := adapter.Scan(ctx, cfg.mac)
 	if err != nil {
-		io.WriteString(stderr, status.ErrorLine(err))
+		printError(stderr, err)
 		return 1
 	}
 	controller, err := selectController(found)
 	if err != nil {
-		io.WriteString(stderr, status.ErrorLine(err))
+		printError(stderr, err)
 		return 1
 	}
 	conn, err := connect(ctx, adapter, controller.Address)
 	if err != nil {
-		io.WriteString(stderr, status.ErrorLine(err))
+		printError(stderr, err)
 		return 1
 	}
 	defer closeConn(conn, stderr)
 	reply, err := conn.RequestStatus(ctx)
 	if err != nil {
-		io.WriteString(stderr, status.ErrorLine(err))
+		printError(stderr, err)
 		return 1
 	}
 	rx := receivedReply{reply: reply, device: controller.Address, at: time.Now()}
 	if rx.bootID, err = boot.ID(); err != nil {
-		io.WriteString(stderr, status.ErrorLine(err))
+		printError(stderr, err)
 		return 1
 	}
 	if rx.uptimeS, err = boot.Uptime(); err != nil {
-		io.WriteString(stderr, status.ErrorLine(err))
+		printError(stderr, err)
 		return 1
 	}
 	return report(cfg, rx, stdout, stderr)
@@ -119,8 +120,26 @@ func closeConn(conn *ble.Conn, stderr io.Writer) {
 		}
 	}()
 	if err := conn.Close(); err != nil {
-		io.WriteString(stderr, status.ErrorLine(fmt.Errorf("close: %w", err)))
+		printError(stderr, fmt.Errorf("close: %w", err))
 	}
+}
+
+// printError writes err to stderr as one error line.
+func printError(stderr io.Writer, err error) {
+	io.WriteString(stderr, status.ErrorLine(nameClass(err)))
+}
+
+// nameClass puts the name of err's BlueZ error class in front of its message
+// when the message doesn't have it. The message comes from D-Bus, such as
+// `Method "Get" … doesn't exist` for an adapter that is gone, which doesn't
+// say what is wrong.
+func nameClass(err error) error {
+	for _, class := range []error{ble.ErrNoAdapter, ble.ErrAccessDenied, ble.ErrBlueZNotRunning, ble.ErrAdapterUnavailable} {
+		if errors.Is(err, class) && !strings.Contains(err.Error(), class.Error()) {
+			return fmt.Errorf("%w: %w", class, err)
+		}
+	}
+	return err
 }
 
 // receivedReply is a whole reply from the controller, with where and when it
@@ -140,7 +159,7 @@ type receivedReply struct {
 func report(cfg config, rx receivedReply, stdout, stderr io.Writer) int {
 	reading, err := status.Decode(rx.reply)
 	if err != nil {
-		io.WriteString(stderr, status.ErrorLine(err))
+		printError(stderr, err)
 		return 1
 	}
 	rec := status.Record{Time: rx.at, BootID: rx.bootID, UptimeS: rx.uptimeS, Device: rx.device, Reading: reading}
@@ -150,7 +169,7 @@ func report(cfg config, rx receivedReply, stdout, stderr io.Writer) int {
 		err = status.NewTextWriter(stdout).Write(rec)
 	}
 	if err != nil {
-		io.WriteString(stderr, status.ErrorLine(err))
+		printError(stderr, err)
 		return 1
 	}
 	for _, fe := range reading.FieldErrors {

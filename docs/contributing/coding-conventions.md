@@ -41,3 +41,22 @@ built on them. An address or mode is a typed value, never raw bytes.
 `TestNoExportedByteWriter` in `ble/api_test.go` enforces this by parsing every
 non-test `.go` file in `ble/` with build tags ignored, so the Linux files are
 checked on the Mac. Unexported helpers may take `[]byte`.
+
+The guard reads parameter lists only, so it is a backstop, not proof. It does
+not see bytes reaching the controller through:
+
+- exported struct fields, or a struct parameter with a `[]byte` field;
+- exported variables or fields of function type, such as
+  `var Write = func([]byte) {}`, or function-typed parameters and results;
+- embedded types, such as an exported struct embedding `io.Writer`;
+- generic type parameters, such as `func Send[T ~[]byte](p T)`;
+- types from other packages, such as `json.RawMessage`, or the Bluetooth
+  library's `DeviceCharacteristic`, whose `Write` and `WriteWithoutResponse`
+  take `[]byte`;
+- `string`, `[]rune`, `io.Reader` or `any` parameters, which can carry bytes as
+  well as `[]byte` can;
+- packages below `ble/`, which it doesn't scan.
+
+Review of every `ble` change must check these by hand: nothing exported may
+let a caller choose what is written, and the library's characteristic types
+must never be exported.

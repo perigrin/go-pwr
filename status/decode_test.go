@@ -171,3 +171,36 @@ func TestDecodeShortReplyNoPanic(t *testing.T) {
 		}
 	}
 }
+
+// wantInt checks that a nullable decoded value is present and equals want.
+func wantInt(t *testing.T, name string, got *int, want int) {
+	t.Helper()
+	if got == nil {
+		t.Errorf("%s = null, want %d", name, want)
+	} else if *got != want {
+		t.Errorf("%s = %d, want %d", name, *got, want)
+	}
+}
+
+func TestDecodeCapturedReply(t *testing.T) {
+	reply := capturedReply(t)
+	r, err := Decode(reply)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	wantInt(t, "BatteryType", r.BatteryType, 3)
+	wantInt(t, "ChargeState", r.ChargeState, 0)
+	wantInt(t, "TempC", r.TempC, 22)
+	wantInt(t, "TempF", r.TempF, 72)
+	wantInt(t, "AhToday", r.AhToday, 12)
+	wantInt(t, "AhYesterday", r.AhYesterday, 15)
+	wantInt(t, "Ah2d", r.Ah2d, 16)
+	wantInt(t, "Ah3d", r.Ah3d, 4)
+	wantInt(t, "Ah7d", r.Ah7d, 93)
+	if r.Raw != reply {
+		t.Errorf("Raw = %q, want the reply untouched", r.Raw)
+	}
+	if len(r.FieldErrors) != 0 {
+		t.Errorf("FieldErrors = %v, want none", r.FieldErrors)
+	}
+}

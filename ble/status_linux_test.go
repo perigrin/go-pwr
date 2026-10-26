@@ -192,11 +192,12 @@ func TestRequestStatusSettle(t *testing.T) {
 			longest = gap
 		}
 		if err == nil {
-			_, decodeErr := status.Decode(reply)
+			reading, decodeErr := status.Decode(reply)
 			switch {
-			case len(reply) != wholeFramedReply || decodeErr != nil:
+			case len(reply) != wholeFramedReply || decodeErr != nil || len(reading.Warnings) > 0 || len(reading.FieldErrors) > 0:
 				failed++
-				t.Errorf("connection %2d: reply %q does not decode whole: %v", i, reply, decodeErr)
+				t.Errorf("connection %2d: reply %q is not a clean whole reading: decode error %v, warnings %v, field errors %v",
+					i, reply, decodeErr, reading.Warnings, reading.FieldErrors)
 			default:
 				whole++
 			}
@@ -264,5 +265,31 @@ func TestRequestStatusWithoutConnectionErrors(t *testing.T) {
 	}
 	if written != 0 {
 		t.Errorf("%d requests were written, want none", written)
+	}
+}
+
+// TestRequestStatusClosedBeforeWriteWritesNothing starts Close while a request
+// is between its checks and its write, and expects the request to return
+// ErrNotConnected without writing.
+func TestRequestStatusClosedBeforeWriteWritesNothing(t *testing.T) {
+	conn := connectController(t)
+	written := 0
+	closed := make(chan error, 1)
+	conn.afterWrite = func() { written++ }
+	conn.beforeWrite = func() {
+		go func() { closed <- conn.Close() }()
+		<-conn.closing // Close has begun, and is waiting for this request
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, err := conn.RequestStatus(ctx)
+	if !errors.Is(err, ErrNotConnected) {
+		t.Errorf("RequestStatus() error = %v, want ErrNotConnected", err)
+	}
+	if written != 0 {
+		t.Errorf("%d requests were written after Close began, want none", written)
+	}
+	if err := <-closed; err != nil {
+		t.Errorf("Close() error = %v", err)
 	}
 }

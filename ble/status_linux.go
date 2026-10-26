@@ -73,7 +73,7 @@ func (c *Conn) RequestStatus(ctx context.Context) (string, error) {
 		}
 		c.link = link
 	}
-	reply, err := c.link.request(ctx, c.closing, c.afterWrite)
+	reply, err := c.link.request(ctx, c.closing, c.beforeWrite, c.afterWrite)
 	if err != nil {
 		if errors.Is(err, ErrNotConnected) {
 			return "", fmt.Errorf("status request: %w", err)
@@ -282,7 +282,7 @@ func (l *statusLink) state() readState {
 }
 
 // request writes the status request and waits for its reply.
-func (l *statusLink) request(ctx context.Context, closing <-chan struct{}, afterWrite func()) (string, error) {
+func (l *statusLink) request(ctx context.Context, closing <-chan struct{}, beforeWrite, afterWrite func()) (string, error) {
 	if l.unfinished {
 		if err := l.drain(ctx, closing); err != nil {
 			return "", err
@@ -300,6 +300,15 @@ func (l *statusLink) request(ctx context.Context, closing <-chan struct{}, after
 	l.cur = readState{}
 	l.mu.Unlock()
 
+	if beforeWrite != nil {
+		beforeWrite()
+	}
+	// Close may have begun since the checks; it must not meet a write.
+	select {
+	case <-closing:
+		return "", fmt.Errorf("%w: the connection was closed", ErrNotConnected)
+	default:
+	}
 	started := time.Now()
 	call := target.send(ctx)
 	if call.Err != nil {

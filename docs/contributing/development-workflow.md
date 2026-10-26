@@ -20,6 +20,14 @@ ssh lola "cd go-pwr-test && env GO_PWR_TEST_MAC=C3:00:00:58:51:40 ./ble.test -te
 
 The same pattern, `GOOS=linux GOARCH=arm GOARM=6 go test -c -trimpath -buildvcs=false -o <pkg>.test ./<pkg>` then `./<pkg>.test -test.count=1` on lola, works for every package. `-trimpath -buildvcs=false` makes the binary reproducible, so a binary on lola can be checked against a fresh cross-compile by SHA-256.
 
+- The end-to-end tests (`gopwr.test`, from `./cmd/go-pwr`) run the cross-built `go-pwr` binary that sits beside them, so copy both to lola together, and again after every change, so neither is stale:
+
+  ```
+  d=$(mktemp -d) && GOOS=linux GOARCH=arm GOARM=6 go test -c -trimpath -buildvcs=false -o "$d/gopwr.test" ./cmd/go-pwr && GOOS=linux GOARCH=arm GOARM=6 go build -trimpath -buildvcs=false -o "$d/go-pwr" ./cmd/go-pwr && ssh lola mkdir -p go-pwr-test && scp "$d/gopwr.test" "$d/go-pwr" lola:go-pwr-test/
+  ssh lola "cd go-pwr-test && env GO_PWR_TEST_MAC=C3:00:00:58:51:40 ./gopwr.test -test.count=1 -test.run '^TestOneShot' -test.v"
+  ```
+
+  The ones that stop BlueZ, unbind hci0 or deny `nobody` access need `sudo -n` as above. Without `--mac`, `TestOneShotWithoutMac` needs the test controller to be the only GP-PWM-30-SB in range.
 - Tests that talk to the controller are skipped unless `GO_PWR_TEST_MAC` is set, on lola, to the controller's address. Tests that only need Linux, such as `internal/boot`, run without it.
 - Tests that need root run with `ssh lola "cd go-pwr-test && sudo -n env GO_PWR_TEST_MAC=… ./ble.test …"`. `env` keeps `GO_PWR_TEST_MAC` through `sudo`, and `-n` means sudo never prompts. The `ble` tests that need root block the adapter with `rfkill`, power it off, unbind hci0 from `hci_uart_bcm`, mask and stop BlueZ, and install a deny drop-in for `nobody` in `/etc/dbus-1/system.d/`. Each restores what it changed in a `;`-joined `t.Cleanup`, so a failed step doesn't stop the rest.
 - lola takes one ssh session at a time, so run one test binary at a time, and one ssh command at a time. lola refused ssh sessions with `resources` errors when nine hit it at once.
@@ -57,6 +65,6 @@ All changes need a pull request, and the tests must pass. Don't use `--no-verify
 Cross-compile for a Raspberry Pi Zero W (ARMv6) and copy the binary over:
 
 ```
-GOOS=linux GOARCH=arm GOARM=6 go build ./cmd/go-pwr
+GOOS=linux GOARCH=arm GOARM=6 go build -o go-pwr ./cmd/go-pwr
 scp go-pwr <host>:
 ```

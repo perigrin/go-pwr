@@ -24,12 +24,24 @@ var (
 	errBadSignal  = errors.New("signal is not a characteristic value change")
 )
 
+// connectOrdered connects to the system bus with godbus's sequential signal
+// handler, the first precondition of notificationConsumer. It needs a bus, so
+// it is exercised only where there is one.
+func connectOrdered() (*dbus.Conn, error) {
+	conn, err := dbus.ConnectSystemBus(dbus.WithSignalHandler(dbus.NewSequentialSignalHandler()))
+	if err != nil {
+		return nil, fmt.Errorf("connect to the system bus: %w", err)
+	}
+	return conn, nil
+}
+
 // characteristicMatch is the match rule that narrows the connection's signals
 // to the property changes of one characteristic, so that other devices and
 // other characteristics never reach the consumer. The consumer checks the
 // path again, because a match rule is only a request to the bus.
 func characteristicMatch(path dbus.ObjectPath) []dbus.MatchOption {
 	return []dbus.MatchOption{
+		dbus.WithMatchSender("org.bluez"),
 		dbus.WithMatchObjectPath(path),
 		dbus.WithMatchInterface(propertiesInterface),
 		dbus.WithMatchMember(propertiesChangedMember),
@@ -39,6 +51,18 @@ func characteristicMatch(path dbus.ObjectPath) []dbus.MatchOption {
 // notificationConsumer passes the notifications of one characteristic to its
 // sink in the order godbus delivered them. It is the only reader of the
 // signal channel, so it keeps that order.
+//
+// Two preconditions hold the ordering, and the type system cannot check
+// either:
+//
+//   - The connection must be built with
+//     dbus.WithSignalHandler(dbus.NewSequentialSignalHandler()). The default
+//     handler delivers signals from deferred goroutines, which reorder
+//     back-to-back notifications. connectOrdered builds such a connection.
+//   - The request's write and the signal subscription must share that one
+//     connection, since Sequence counts per connection. A key from another
+//     connection, such as the bluetooth library's shared system bus, means
+//     nothing next to these.
 //
 // The ordering key is the signal's Sequence. godbus numbers every message its
 // connection accepts, 1, 2, 3, ... in the order its single reader goroutine
@@ -51,6 +75,10 @@ func characteristicMatch(path dbus.ObjectPath) []dbus.MatchOption {
 type notificationConsumer struct {
 	// path is the one characteristic whose notifications are consumed.
 	path dbus.ObjectPath
+	// sender, when set, is the unique bus name of BlueZ's connection; signals
+	// from any other connection are ignored. Resolve it with GetNameOwner on
+	// "org.bluez" over the same connection the signals arrive on.
+	sender string
 	// sink gets each notification's key and payload, one at a time, in order.
 	sink func(key uint64, chunk []byte)
 	// dropped, when set, hears of a signal for path that could not be used.
@@ -68,6 +96,9 @@ func (c *notificationConsumer) consume(ch <-chan *dbus.Signal) {
 // is not a Value change of the characteristic at c.path.
 func (c *notificationConsumer) handle(sig *dbus.Signal) {
 	if sig == nil || sig.Path != c.path || sig.Name != propertiesChangedName {
+		return
+	}
+	if c.sender != "" && sig.Sender != c.sender {
 		return
 	}
 	if len(sig.Body) < 2 {

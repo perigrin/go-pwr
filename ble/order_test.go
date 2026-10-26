@@ -349,3 +349,29 @@ func TestOrderedDeliveryRefusesReorderedSequence(t *testing.T) {
 		t.Errorf("reordered read ended with %v, want status.ErrKeyOrder", got.err)
 	}
 }
+
+// TestOrderedDeliveryIgnoresOtherSenders: a signal on FFF1's path from a
+// connection other than BlueZ's is ignored, never passed on or reported.
+func TestOrderedDeliveryIgnoresOtherSenders(t *testing.T) {
+	var sunk []delivered
+	var dropped []error
+	c := &notificationConsumer{
+		path:    fff1Path,
+		sender:  ":1.7",
+		sink:    func(key uint64, chunk []byte) { sunk = append(sunk, delivered{key, chunk}) },
+		dropped: func(err error) { dropped = append(dropped, err) },
+	}
+	spoof := valueSignal(fff1Path, 1, []byte("spoofed"))
+	spoof.Sender = ":1.99"
+	noSender := valueSignal(fff1Path, 2, []byte("no sender"))
+	noSender.Sender = ""
+	c.handle(spoof)
+	c.handle(noSender)
+	c.handle(valueSignal(fff1Path, 3, []byte("from bluez")))
+	if len(sunk) != 1 || string(sunk[0].chunk) != "from bluez" {
+		t.Errorf("sink saw %v, want only the notification from BlueZ", sunk)
+	}
+	if len(dropped) != 0 {
+		t.Errorf("foreign senders were reported as drops: %v", dropped)
+	}
+}

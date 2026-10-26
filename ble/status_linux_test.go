@@ -19,6 +19,31 @@ import (
 // leading space, the 166-byte body and CRLF.
 const wholeFramedReply = 169
 
+// connectWithRetry scans for the controller and connects, trying again after
+// a failed connect. BlueZ sometimes aborts a connect with
+// le-connection-abort-by-local, which protocol.md ("Time budget on lola")
+// records as an ordinary failed reading, and does so most often right after
+// the link to the controller was dropped. Those are retried here, since the
+// test is about the request, not the connect.
+func connectWithRetry(t *testing.T, adapter *Adapter, mac string) *Conn {
+	t.Helper()
+	const attempts = 4
+	for attempt := 1; ; attempt++ {
+		scanFor(t, adapter, mac)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		conn, err := adapter.Connect(ctx, mac)
+		cancel()
+		if err == nil {
+			return conn
+		}
+		t.Logf("Connect(%s) attempt %d error = %v", mac, attempt, err)
+		if attempt == attempts {
+			t.Fatalf("Connect(%s) failed %d times, last error = %v", mac, attempts, err)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
 // connectController scans for the controller and connects to it, and closes
 // the link when the test ends, even if the test fails. It leaves the
 // controller disconnected, with notifications off, however the test ends.
@@ -27,13 +52,7 @@ func connectController(t *testing.T) *Conn {
 	adapter := openAdapter(t)
 	mac := os.Getenv("GO_PWR_TEST_MAC")
 	ensureLinkDownOnCleanup(t, mac)
-	scanFor(t, adapter, mac)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	conn, err := adapter.Connect(ctx, mac)
-	if err != nil {
-		t.Fatalf("Connect(%s) error = %v", mac, err)
-	}
+	conn := connectWithRetry(t, adapter, mac)
 	t.Cleanup(func() {
 		if err := conn.Close(); err != nil {
 			t.Errorf("Close() error = %v", err)

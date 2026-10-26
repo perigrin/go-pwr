@@ -8,7 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
+	"regexp"
 	"time"
 )
 
@@ -65,6 +65,30 @@ func parsePositive(s string) (time.Duration, error) {
 	return d, nil
 }
 
+// bluetoothAddress is exactly six colon-separated two-digit hex octets.
+// net.ParseMAC is not enough: it also accepts EUI-64, 20-byte, dashed and
+// dotted forms that are not Bluetooth addresses.
+var bluetoothAddress = regexp.MustCompile(`^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$`)
+
+// macValue is the flag.Value for --mac. It rejects an invalid or empty value
+// as soon as the flag is given, so an empty --mac= is not mistaken for absent.
+type macValue struct{ s *string }
+
+func (m macValue) String() string {
+	if m.s == nil {
+		return ""
+	}
+	return *m.s
+}
+
+func (m macValue) Set(s string) error {
+	if !bluetoothAddress.MatchString(s) {
+		return errors.New("want six colon-separated hex octets, as in C3:00:00:58:51:40")
+	}
+	*m.s = s
+	return nil
+}
+
 // timeoutValue is the flag.Value for --timeout.
 type timeoutValue struct{ d *time.Duration }
 
@@ -93,7 +117,7 @@ func parseArgs(args []string, stderr io.Writer) (config, error) {
 	cfg := config{format: "text", timeout: 20 * time.Second}
 	fs := flag.NewFlagSet("go-pwr", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.StringVar(&cfg.mac, "mac", "", "controller `address`")
+	fs.Var(macValue{&cfg.mac}, "mac", "controller `address`")
 	fs.StringVar(&cfg.format, "format", cfg.format, "output format, text or json")
 	fs.Var(timeoutValue{&cfg.timeout}, "timeout", "budget for one reading, default 20s")
 	fs.Var(modeValue{&cfg.poll, 30 * time.Second}, "poll", "read every `DUR`, connecting each time")
@@ -117,11 +141,6 @@ func (c config) validate(positional int) error {
 	}
 	if c.poll > 0 && c.follow > 0 {
 		return errors.New("--poll and --follow can't both be on")
-	}
-	if c.mac != "" {
-		if _, err := net.ParseMAC(c.mac); err != nil {
-			return fmt.Errorf("invalid --mac %q", c.mac)
-		}
 	}
 	if c.format != "text" && c.format != "json" {
 		return fmt.Errorf("invalid --format %q: want text or json", c.format)

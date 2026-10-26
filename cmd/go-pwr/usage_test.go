@@ -123,3 +123,106 @@ func TestMacRequiredForMachineModes(t *testing.T) {
 		t.Run(joinArgs(args), func(t *testing.T) { wantMacRequired(t, args...) })
 	}
 }
+
+func TestInvalidMacBeatsMissingMac(t *testing.T) {
+	for _, args := range [][]string{
+		{"--format", "json", "--mac", "nope"},
+		{"--poll", "--mac", "nope"},
+		{"--follow", "--mac", "nope"},
+	} {
+		t.Run(joinArgs(args), func(t *testing.T) { wantUsageError(t, args...) })
+	}
+}
+
+func TestUsageErrorsPrecedeMacRequired(t *testing.T) {
+	for _, args := range [][]string{
+		{"--poll", "10s"},
+		{"--format", "xml"},
+		{"--format=json", "--timeout=0s"},
+		{"--poll", "--follow"},
+		{"--follow=soon"},
+	} {
+		t.Run(joinArgs(args), func(t *testing.T) { wantUsageError(t, args...) })
+	}
+}
+
+func TestMacRejectsNonBluetoothForms(t *testing.T) {
+	for _, mac := range []string{
+		"C3:00:00:58:51",          // five octets
+		"C3:00:00:58:51:40:41",    // seven octets
+		"C3-00-00-58-51-40",       // dashes
+		"C300.0058.5140",          // dots
+		"C3:00:00:58:51:40:00:01", // EUI-64, which net.ParseMAC accepts
+		"00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:01", // 20 bytes, likewise
+		"C3:00:00:58:51:4G",   // non-hex digit
+		"C:0:0:58:51:40",      // single-digit octets
+		" C3:00:00:58:51:40",  // leading space
+		"C3:00:00:58:51:40\n", // trailing newline
+		"",                    // empty value
+	} {
+		t.Run(mac, func(t *testing.T) { wantUsageError(t, "--mac="+mac) })
+	}
+	r := runBinary(t, "--mac=c3:00:00:58:51:40")
+	if r.status == 2 {
+		t.Errorf("lowercase address rejected: stderr %q", r.stderr)
+	}
+}
+
+func TestModeValueNotBoolShorthand(t *testing.T) {
+	for _, args := range [][]string{
+		{"--poll=1"},
+		{"--poll=t"},
+		{"--poll=T"},
+		{"--poll=TRUE"},
+		{"--follow=0"},
+		{"--follow=f"},
+		{"--poll=10"},
+		{"--follow=5"},
+		{"--poll="},
+		{"--follow="},
+	} {
+		t.Run(joinArgs(args), func(t *testing.T) { wantUsageError(t, args...) })
+	}
+}
+
+func TestFormatRejectsCaseAndEmpty(t *testing.T) {
+	for _, args := range [][]string{
+		{"--format", "JSON"},
+		{"--format", "Text"},
+		{"--format="},
+		{"--format", "text,json"},
+		{"--format", " text"},
+	} {
+		t.Run(joinArgs(args), func(t *testing.T) { wantUsageError(t, args...) })
+	}
+}
+
+func TestPositionalAfterFlagsExit2(t *testing.T) {
+	mac := "--mac=C3:00:00:58:51:40"
+	for _, args := range [][]string{
+		{mac, "extra"},
+		{mac, "--format=json", "extra"},
+		{mac, "--poll=10s", "extra"},
+		{mac, "--", "extra"},
+		{mac, "--format=json", "--", "--poll"},
+		{"extra", mac},
+	} {
+		t.Run(joinArgs(args), func(t *testing.T) { wantUsageError(t, args...) })
+	}
+}
+
+func TestMacRequiredBeforeBluetooth(t *testing.T) {
+	for _, args := range [][]string{
+		{"--format", "json"},
+		{"--poll"},
+		{"--follow"},
+	} {
+		t.Run(joinArgs(args), func(t *testing.T) {
+			wantMacRequired(t, args...)
+			r := runBinary(t, args...)
+			if strings.Contains(strings.ToLower(r.stderr), "unsupported platform") {
+				t.Errorf("go-pwr %q reached Bluetooth before checking --mac: stderr %q", args, r.stderr)
+			}
+		})
+	}
+}

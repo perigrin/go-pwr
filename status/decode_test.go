@@ -5,6 +5,7 @@ package status
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -32,5 +33,51 @@ func TestDecodeGatingFieldsCapturedReply(t *testing.T) {
 	}
 	if r.SolarMV != 22879 {
 		t.Errorf("SolarMV = %d, want 22879", r.SolarMV)
+	}
+}
+
+// alteredReply returns the real capture with field index replaced by value.
+// Altered captures exercise error paths; they never stand in for a real
+// reading being accepted.
+func alteredReply(t *testing.T, index int, value string) string {
+	t.Helper()
+	fields := strings.Split(capturedReply(t), ";")
+	fields[index] = value
+	return strings.Join(fields, ";")
+}
+
+// gatingFields are the three fields whose values can fail a reading.
+var gatingFields = []struct {
+	name  string
+	index int
+}{
+	{"charge current", indexChargeMA},
+	{"battery voltage", indexBatteryMV},
+	{"PV voltage", indexSolarMV},
+}
+
+func TestGatingBounds(t *testing.T) {
+	cases := []struct {
+		field string
+		index int
+		value string
+	}{
+		{"charge current", indexChargeMA, "37501"},
+		{"charge current", indexChargeMA, "99999"},
+		{"battery voltage", indexBatteryMV, "35001"},
+		{"battery voltage", indexBatteryMV, "99999"},
+		{"PV voltage", indexSolarMV, "35001"},
+		{"PV voltage", indexSolarMV, "99999"},
+	}
+	for _, c := range cases {
+		reply := alteredReply(t, c.index, c.value)
+		_, err := Decode(reply)
+		if err == nil {
+			t.Errorf("%s %s: Decode succeeded, want a bounds error", c.field, c.value)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.field) {
+			t.Errorf("%s %s: error %q does not name the field", c.field, c.value, err)
+		}
 	}
 }

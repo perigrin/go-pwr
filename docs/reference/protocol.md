@@ -105,6 +105,20 @@ From the Android app's `PwmBatteryUtil.getChargingMode`. Its exact strings, miss
 
 From `PwmBatteryUtil.getBatteryType`: 0 `Sealed`, 1 `FLOODED`, 2 `LIFEPO`, 3 `AGM`, 4 `CUSTOM`, 5 `Not Used`.
 
+### Plausibility bounds
+
+Only three fields can fail a reading on their values: charge current (index 0), battery voltage (index 2) and PV voltage (index 11). Each must be an unsigned decimal of at most five digits, the width of the field, and lie inside the bounds below, inclusive. The bounds come from what the GP-PWM-30-SB can report, never from the range seen in captures, and must never reject a real reading, however low. The source for the ratings is the GP-PWM-30-SB User Manual (2019), sections 1.2 *System Voltage and Current* and 1.6 *Specifications*.
+
+| Field | Lower bound | Reason | Upper bound | Reason |
+|---|---|---|---|---|
+| Charge current | 0 mA | The field is unsigned, and no current flows at night. | 37,500 mA | The rated maximum continuous DC input current is 37.5 A. A PWM controller passes the array current to the battery, so it can't charge with more. |
+| Battery voltage | 0 mV | See below. | 35,000 mV | 35 VDC is the highest voltage any terminal of the controller is rated for (Maximum Solar DC Input Voltage). A 12 V nominal battery above it is not a voltage this controller can measure. |
+| PV voltage | 0 mV | The field is unsigned, and the array gives nothing at night. | 35,000 mV | The rated Maximum Solar DC Input Voltage is 35 VDC. |
+
+**A battery field of `00000` is accepted.** The manual rates the battery input at 9.0 to 15.5 VDC, and the controller normally runs off its battery, so a lower bound at its operating floor is tempting. It is not used, for two reasons. First, the decision forbids rejecting a real reading however low, and the manual's range is a rating, not a promise that the controller stops reporting below it. Second, the controller can report with its battery disconnected while the array powers it, and then a battery voltage near 0 is real. The 0.00 V reading that one chunk swap produces is therefore not caught here. In-order delivery from the Bluetooth layer is what prevents it (decision 0001, *Shape of the code*).
+
+A value with a leading `+` is accepted, since the reply's fields may carry a sign. A negative value, a sign alone, an empty field, embedded spaces, hexadecimal digits, or more than five digits fail the reading.
+
 ## Other writes: do not send
 
 `FFF2` is the input to a serial bridge. The app's other commands are ASCII strings sent **one character per write**, so the controller is parsing a character stream. That makes any stray byte on `FFF2` potentially part of a command. A monitoring client should write only the single byte `0x20`.

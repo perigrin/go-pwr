@@ -38,6 +38,22 @@
 // seen); and an adapter that is on the bus with Powered false is
 // ErrAdapterUnavailable. Open never powers on or unblocks the adapter.
 //
+// # Connecting
+//
+// Connect makes its link with a D-Bus call that ctx can cancel, not the
+// library's Connect, which waits for the link with no way to stop it. When
+// ctx ends, Connect tells BlueZ to disconnect, which also cancels a connect
+// still in progress, waits for the link to be down and returns the context's
+// error. Close does the same, waiting up to 5 s for BlueZ to report the link
+// down.
+//
+// Service discovery is not watched. The library's DiscoverServices polls
+// ServicesResolved every 10 ms for at most 10 s and can't be cancelled, but
+// BlueZ resolves the services during the connect, so on lola the poll ends
+// within about a second (0.3 to 1 s over 40 runs). The breakdown of scan,
+// connect and discovery times is in docs/reference/protocol.md, "Time budget
+// on lola".
+//
 // The bluetooth library hard-codes the adapter name hci0. If an adapter
 // reset brought the adapter back as hci1, every retry would fail until the
 // program restarts. That is unlikely, because Linux reuses the lowest free
@@ -58,10 +74,19 @@ const controllerName = "GP-PWM-30-SB"
 // scans took 7.1 s to hear it, so 8 s is 0.9 s over the slowest seen. That
 // does not bound the tail: a present controller can still be missed, and a
 // miss is a retryable failed reading (protocol.md, "What 8 s does not
-// cover"). It is also the longest window that leaves room in the 20 s
-// default --timeout for the connect (5.9 s), the reply (3 s) and 2 s spare.
-// See "Scan window" in docs/reference/protocol.md.
+// cover"). With --mac the scan stops at the match (4.4 s at worst), so the
+// scan, the connect (9.8 s at worst) and the reply (3 s) fit the 20 s default
+// --timeout. Without --mac the whole window runs, and a one-shot can exceed
+// 20 s and fail as a retryable reading. See "Scan window" and "Time budget on
+// lola" in docs/reference/protocol.md.
 const scanWindow = 8 * time.Second
+
+// closeBound is the longest Close waits for BlueZ to report the link down.
+// BlueZ took 2.3 to 4.6 s to drop the link in 40 runs on lola, so 10 s is
+// twice the slowest. Close runs after the reply, so the wait does not count
+// against the reading's --timeout. See "Time budget on lola" in
+// docs/reference/protocol.md.
+const closeBound = 10 * time.Second
 
 // Error classes. Each is returned wrapped, so test with errors.Is.
 var (
@@ -135,7 +160,9 @@ type Controller struct {
 }
 
 // ErrNotFound is returned, wrapped, by a scan that heard no controller. With
-// an address it means that address did not show up in the whole window.
+// an address it means that address did not show up in the whole window. Connect
+// returns it for an address BlueZ has no device for, because no scan has found
+// it.
 var ErrNotFound = errors.New("controller not found")
 
 // ErrUnsupportedPlatform is returned by every operation on an operating

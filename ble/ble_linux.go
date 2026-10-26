@@ -36,14 +36,14 @@ func Open() (*Adapter, error) {
 		return nil, startupError(fmt.Errorf("connect to the system bus: %w", err))
 	}
 	object := conn.Object("org.bluez", dbus.ObjectPath("/org/bluez/"+adapterName))
-	if err := checkPowered(object); err != nil {
+	if err := checkPowered(context.Background(), object); err != nil {
 		return nil, startupError(err)
 	}
 	library := bluetooth.NewAdapter(adapterName)
 	if err := library.Enable(); err != nil {
 		// The library reads the adapter itself and may drop the typed D-Bus
 		// error, so look again with our own read to classify what went wrong.
-		if again := checkPowered(object); again != nil {
+		if again := checkPowered(context.Background(), object); again != nil {
 			return nil, startupError(again)
 		}
 		return nil, startupError(describe("enable adapter "+adapterName, err))
@@ -55,7 +55,13 @@ func Open() (*Adapter, error) {
 // match ErrRetryable: after Open has succeeded, losing the adapter or BlueZ
 // is an ordinary failed reading.
 func (a *Adapter) Check() error {
-	if err := checkPowered(a.object); err != nil {
+	return a.checkContext(context.Background())
+}
+
+// checkContext is Check, except that ctx ends the wait for BlueZ, whose
+// property read takes about 15 s to fail when BlueZ is masked.
+func (a *Adapter) checkContext(ctx context.Context) error {
+	if err := checkPowered(ctx, a.object); err != nil {
 		return retryableError(err)
 	}
 	return nil
@@ -64,8 +70,9 @@ func (a *Adapter) Check() error {
 // checkPowered returns an error classified by its class, without saying when
 // it happened, unless the adapter is powered. Errors it cannot classify come
 // back unchanged.
-func checkPowered(object dbus.BusObject) error {
-	powered, err := object.GetProperty(poweredProperty)
+func checkPowered(ctx context.Context, object dbus.BusObject) error {
+	var powered dbus.Variant
+	err := object.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, "org.bluez.Adapter1", "Powered").Store(&powered)
 	if err != nil {
 		return describe("read adapter "+adapterName+" power state", err)
 	}
@@ -217,7 +224,7 @@ func describeTarget(mac string) string {
 // its RSSI would read 0 dBm.
 func (a *Adapter) markConnected(found []Controller) {
 	for i := range found {
-		path := dbus.ObjectPath(string(a.object.Path()) + "/dev_" + strings.ReplaceAll(found[i].Address, ":", "_"))
+		path := devicePath(a, found[i].Address)
 		connected, err := a.conn.Object("org.bluez", path).GetProperty("org.bluez.Device1.Connected")
 		if err != nil {
 			continue

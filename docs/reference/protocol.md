@@ -25,7 +25,7 @@ How long a scan runs when it does not stop at a match: a scan for an address tha
 
 - **Advertising interval: 1 s.** With duplicate filtering off (`hcitool lescan --duplicates`, watched with `btmon`), the controller's `ADV_IND` packets arrived 13 times in 22 s. The gaps were 1.0 s five times, 2.0 s four times and 3.0 s three times, so it advertises every 1.0 s and the scanner missed some. The name `GP-PWM-30-SB` is not in the `ADV_IND`: it comes in the `SCAN_RSP` that follows within a few milliseconds, so a scan has to wait for that to tell controllers from other devices.
 - **Time to hear it through BlueZ.** `TestScanTimeToFindController` ran 20 scans for the test controller, each stopping at the match. Time to the match, sorted, in milliseconds: 737, 810, 823, 848, 863, 939, 975, 991, 1146, 1216, 1930, 2034, 2063, 2068, 2883, 4044, 4100, 4113, 4140, 7081. Median 1.6 s, slowest 7.1 s. With BlueZ's default duplicate filtering a device is reported once per scan cycle, which is why the times fall in clusters near 1, 2 and 4 s.
-- **A bound on the other side.** The default `--timeout` of 20 s counts finding the controller. The window, the connect (5.9 s to services resolved in the first look above) and the reply (`TotalTimeout`, 3 s) must fit with 2 s spare, so the window is at most 20 − 2 − 5.9 − 3 = 9.1 s. 8 s is 0.9 s over the slowest of 20 scans and 1.1 s under that bound. `TestScanWindowWithinTimeout` holds both limits. The connect issue re-checks the whole budget with go-pwr's own connect time.
+- **A bound on the other side.** The default `--timeout` of 20 s counts finding the controller. With `--mac` the scan stops at the match, which took 4.44 s at worst, so scan 4.44 + connect 9.79 + discovery 0.97 + reply (`TotalTimeout`, 3) = 18.20 s fits, with 1.8 s spare. That is the path a machine uses. `TestScanWindowWithinTimeout` holds it, and holds the window to be no shorter than the slowest sighting. Without `--mac` the whole window runs: 8 + 9.79 + 0.97 + 3 = 21.76 s does not fit, so a one-shot without `--mac` can run out of time at the slowest connects and fail as a retryable reading. A person can rerun it or pass a longer `--timeout`. perigrin accepted this trade-off and kept the 8 s window (owner decision 13), since shortening it to fit would miss controllers that the 20 scans heard late. The numbers are in **Time budget on lola**.
 - **What 8 s does not cover.** A separate 20 s `btmon` capture of plain `bluetoothctl scan on` showed an 11 s stretch in which no device at all was reported (it followed one cluster of reports and ended with another), longer than the window. A scan that lands in such a stretch finds nothing and fails; a `--poll` reading is retried at its next interval. Whether that stretch is radio coexistence on lola's combined Wi-Fi/Bluetooth chip is not known and is for the busy-RF watch.
 
 ## Connection
@@ -214,7 +214,27 @@ A reply that arrives whole needs no timer: its `\r\n` marks it complete. Timing 
 
 The margin is wide because the capture is one night, one adapter and one controller, and a slower link must not turn a good reply into a failure. A negotiated MTU above 23 would make fewer, larger notifications and finish sooner, so the limits stay safe.
 
-Budget: the default `--timeout` is 20 s. The first look at connecting (above) saw the controller 1.3 s into a scan and services resolved 5.9 s after connect with discovery. That is 7.2 s, plus at most 3 s for `TotalTimeout`, 10.2 s, which leaves nearly 10 s of the 20 s. The connect issue re-checks this with go-pwr's own measurements. When a read gives up, the error quotes what arrived, or says that no reply was received. `--timeout` still bounds the whole reading, and a read's deadline is never later than that bound.
+Budget: the default `--timeout` is 20 s. The first look at connecting (above) saw services resolved 5.9 s after connect, but go-pwr's own measurements (**Time budget on lola**) put the connect as high as 9.79 s. With `--mac`, scan 4.44 s + connect 9.79 s + `TotalTimeout` 3 s is 17.23 s of the 20 s; without `--mac` the 8 s window makes it 20.79 s (see **Scan window**). When a read gives up, the error quotes what arrived, or says that no reply was received. `--timeout` still bounds the whole reading, and a read's deadline is never later than that bound.
+
+### Time budget on lola
+
+Measured on 2026-10-26 on lola by `TestTimeBudget` (`ble/connect_linux_test.go`), over two sessions of 10 runs with the address and 10 without, 40 runs in all. Each run is a scan, a connect, the library's service discovery and a close, with the controller in the same place as the timing capture. The test sends nothing to the controller. Confidence: **observed** on one afternoon, one adapter and one controller. The first run of each session had a cold GATT cache (`bluetoothctl remove` first).
+
+| Step | Range | Notes |
+|---|---|---|
+| Scan, with the address | 0.98–4.44 s | stops at the match; the controller advertises about once a second |
+| Scan, without one | 8.44–9.39 s | the whole 8 s window, plus up to 1.4 s before the scan has stopped and returned |
+| Connect | 1.20–9.79 s (usually 1.5–4 s) | `Device1.Connect` until BlueZ reports `Connected` |
+| Service discovery | 0.31–0.97 s | the library's `DiscoverServices` after the connect; the cold-cache runs were the slowest (0.79–0.97 s) |
+| Close | 2.26–4.61 s | `Device1.Disconnect` until `Connected` is false |
+
+The slowest total of scan, connect and discovery was 10.6 s with an address and 18.56 s without one, because that run's connect took 9.79 s; the next slowest without an address was 13.5 s. Adding the longest reply in the timing capture (202 ms) makes the worst 18.76 s, inside the 20 s `--timeout` with 1.2 s to spare. That is thin, and it holds only because the measured reply is used: with `TotalTimeout` (3 s) in place of it, that one slow run would come to 21.56 s. A reading that runs to `--timeout` is cut off and fails as retryable, so the bound itself holds. The test asserts each run's total plus the 202 ms reply against 20 s, with and without an address.
+
+Three of about 45 connects failed with BlueZ's `le-connection-abort-by-local` after 1.8–3.8 s. That is an ordinary failed reading, retried on the next poll, and the test repeats the run when it happens.
+
+Service discovery is not the bottleneck the library's hard-wired 10 s `ServicesResolved` poll suggested: BlueZ resolves the services during the connect, so the poll found them resolved at once or within about a second. `go-pwr` documents the breakdown and does not watch `ServicesResolved` itself.
+
+Close takes 2–5 s. It runs after the reply, bounded by `closeBound` (10 s, twice the slowest close measured), and `--timeout` bounds the reading, not the disconnect.
 
 ### Handle map
 

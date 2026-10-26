@@ -125,3 +125,70 @@ func TestOpenAdapter(t *testing.T) {
 		t.Fatal("Open() returned a nil Adapter and no error")
 	}
 }
+
+const (
+	denyDropIn   = "/etc/dbus-1/system.d/zz-go-pwr-test-deny.conf"
+	nobodyDir    = "/tmp/go-pwr-test-nobody"
+	reloadBusCmd = "dbus-send --system --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig"
+)
+
+// TestOpenAccessDenied makes the bus deny user nobody access to BlueZ, then
+// runs this binary as nobody to see what Open returns. The child run is the
+// same test with GO_PWR_ACCESS_DENIED_CHILD set.
+func TestOpenAccessDenied(t *testing.T) {
+	requireHardware(t)
+	if os.Getenv("GO_PWR_ACCESS_DENIED_CHILD") == "1" {
+		_, err := Open()
+		var dbusErr dbus.Error
+		t.Logf("Open() error = %v (D-Bus error: %v, %#v)", err, errors.As(err, &dbusErr), dbusErr)
+		if !errors.Is(err, ErrAccessDenied) || !errors.Is(err, ErrFatalAtStartup) {
+			t.Errorf("Open() error = %v, want ErrAccessDenied and ErrFatalAtStartup", err)
+		}
+		if errors.Is(err, ErrBlueZNotRunning) {
+			t.Errorf("Open() error = %v, access denied must not be told as not running", err)
+		}
+		return
+	}
+	requireRoot(t)
+	t.Cleanup(func() {
+		sh(t, "rm -f "+denyDropIn+"; "+reloadBusCmd+"; rm -rf "+nobodyDir)
+	})
+
+	policy := `<busconfig><policy user="nobody"><deny send_destination="org.bluez"/></policy></busconfig>`
+	if err := os.WriteFile(denyDropIn, []byte(policy+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("sh", "-c", reloadBusCmd).CombinedOutput(); err != nil {
+		t.Fatalf("reload the bus: %v: %s", err, out)
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(nobodyDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(nobodyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	child := nobodyDir + "/ble.test"
+	if err := os.WriteFile(child, binary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command("runuser", "-u", "nobody", "--", "env", "HOME=/tmp",
+		"GO_PWR_ACCESS_DENIED_CHILD=1", "GO_PWR_TEST_MAC="+os.Getenv("GO_PWR_TEST_MAC"),
+		child, "-test.run", "^TestOpenAccessDenied$", "-test.v").CombinedOutput()
+	t.Logf("child output:\n%s", out)
+	if err != nil {
+		t.Errorf("child run as nobody: %v", err)
+	}
+	if !strings.Contains(string(out), "--- PASS: TestOpenAccessDenied (") {
+		t.Errorf("child run as nobody did not pass")
+	}
+}

@@ -5,6 +5,8 @@ package status
 
 import (
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -129,5 +131,112 @@ func TestTempMismatchWarnsOnly(t *testing.T) {
 	}
 	if r.TempF == nil || *r.TempF != 80 || r.ChargeMA != 655 {
 		t.Errorf("reading not returned intact: %+v", r)
+	}
+}
+
+// alteredTemps returns the real capture with the °C and °F fields replaced.
+func alteredTemps(t *testing.T, c, f string) string {
+	t.Helper()
+	fields := strings.Split(capturedReply(t), ";")
+	fields[indexTempC] = c
+	fields[indexTempF] = f
+	return strings.Join(fields, ";")
+}
+
+func decodeTemps(t *testing.T, c, f string) Reading {
+	t.Helper()
+	r, err := Decode(alteredTemps(t, c, f))
+	if err != nil {
+		t.Fatalf("Decode %s/%s: %v", c, f, err)
+	}
+	return r
+}
+
+// TestTempToleranceBoundary puts °F exactly at the tolerance (2.6 °F, 13
+// fifths) on each side of 9/5·°C + 32, then one degree beyond it.
+func TestTempToleranceBoundary(t *testing.T) {
+	cases := []struct {
+		c, f     string
+		warnings int
+	}{
+		{"+03", "+40", 0}, // 37.4 expected: 2.6 °F above
+		{"+03", "+41", 1}, // 3.6 above
+		{"+22", "+69", 0}, // 71.6 expected: 2.6 °F below
+		{"+22", "+68", 1}, // 3.6 below
+	}
+	for _, c := range cases {
+		r := decodeTemps(t, c.c, c.f)
+		if n := len(tempWarnings(t, r)); n != c.warnings || len(r.Warnings) != c.warnings {
+			t.Errorf("%s °C / %s °F: %d warnings %v, want %d", c.c, c.f, len(r.Warnings), r.Warnings, c.warnings)
+		}
+	}
+}
+
+func TestTempCheckSwappedFieldsWarn(t *testing.T) {
+	r := decodeTemps(t, "+72", "+22")
+	ws := tempWarnings(t, r)
+	if len(ws) != 1 || len(r.Warnings) != 1 {
+		t.Fatalf("got warnings %v, want one temperature warning", r.Warnings)
+	}
+	if ws[0].TempC != 72 || ws[0].TempF != 22 {
+		t.Errorf("warning = %+v, want 72 °C / 22 °F", ws[0])
+	}
+}
+
+func TestTempCheckSignedAndThreeDigitNoWarning(t *testing.T) {
+	for _, c := range []struct{ c, f string }{
+		{"-40", "-40"},
+		{"-18", "+00"},
+		{"+38", "+100"},
+		{"+00", "+30"}, // −0.99 °C truncated toward zero
+	} {
+		r := decodeTemps(t, c.c, c.f)
+		if r.TempC == nil || r.TempF == nil {
+			t.Errorf("%s/%s: a temperature failed to decode: %v", c.c, c.f, r.FieldErrors)
+		}
+		if len(r.Warnings) != 0 {
+			t.Errorf("%s °C / %s °F: warnings %v, want none", c.c, c.f, r.Warnings)
+		}
+	}
+}
+
+func TestTempCheckSkippedWhenOneNull(t *testing.T) {
+	r := decodeTemps(t, "xx", "+80")
+	if r.TempC != nil || r.TempF == nil || *r.TempF != 80 {
+		t.Errorf("°C null, °F kept: got %v / %v", r.TempC, r.TempF)
+	}
+	if len(r.Warnings) != 0 {
+		t.Errorf("°C null: warnings %v, want none", r.Warnings)
+	}
+	r = decodeTemps(t, "+22", "xx")
+	if r.TempF != nil || r.TempC == nil || *r.TempC != 22 {
+		t.Errorf("°F null, °C kept: got %v / %v", r.TempC, r.TempF)
+	}
+	if len(r.Warnings) != 0 {
+		t.Errorf("°F null: warnings %v, want none", r.Warnings)
+	}
+}
+
+func TestTempMismatchLeavesReadingUnchanged(t *testing.T) {
+	base, err := Decode(capturedReply(t))
+	if err != nil {
+		t.Fatalf("Decode capture: %v", err)
+	}
+	reply := alteredReply(t, indexTempF, "+80")
+	got, err := Decode(reply)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(got.Warnings) != 1 {
+		t.Fatalf("got warnings %v, want one", got.Warnings)
+	}
+	// Every decoded value is the capture's, bar the °F the test changed.
+	f := 80
+	want := base
+	want.TempF = &f
+	want.Raw = reply
+	got.Warnings = nil
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("warning changed the reading:\n got %+v\nwant %+v", got, want)
 	}
 }

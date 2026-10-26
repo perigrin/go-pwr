@@ -53,8 +53,13 @@ import (
 // controllerName is the Bluetooth name the GP-PWM-30-SB advertises.
 const controllerName = "GP-PWM-30-SB"
 
-// scanWindow is how long a scan runs.
-const scanWindow = 20 * time.Second
+// scanWindow is how long a scan runs when it does not stop at a match. The
+// controller advertises about once a second, and on lola the slowest of 20
+// scans took 7.1 s to hear it. So 8 s hears every controller in range with
+// 0.9 s to spare. It is also the longest window that leaves room in the 20 s
+// default --timeout for the connect (5.9 s), the reply (3 s) and 2 s spare.
+// See "Scan window" in docs/reference/protocol.md.
+const scanWindow = 8 * time.Second
 
 // Error classes. Each is returned wrapped, so test with errors.Is.
 var (

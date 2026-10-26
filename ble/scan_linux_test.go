@@ -127,3 +127,28 @@ func TestScanRecoversLibraryUUIDsPanic(t *testing.T) {
 		t.Errorf("Scan() after the panic = %+v, want %s", found, mac)
 	}
 }
+
+// TestScanTimeToFindController scans for the test controller 20 times and logs
+// how long each took to hear it. The scan window is chosen from these numbers
+// (docs/reference/protocol.md, "Scan window"). It sleeps a second between
+// scans so each starts from a stopped adapter.
+func TestScanTimeToFindController(t *testing.T) {
+	adapter := openAdapter(t)
+	mac := os.Getenv("GO_PWR_TEST_MAC")
+	var times []time.Duration
+	for i := range 20 {
+		started := time.Now()
+		found, err := adapter.Scan(context.Background(), mac)
+		took := time.Since(started)
+		if err != nil {
+			t.Errorf("scan %d: %v after %v", i, err, took)
+			continue
+		}
+		t.Logf("scan %2d: %s found after %v, RSSI %d dBm", i, found[0].Address, took.Round(time.Millisecond), found[0].RSSI)
+		times = append(times, took)
+		time.Sleep(time.Second)
+	}
+	if len(times) == 0 {
+		t.Fatal("no scan found the controller")
+	}
+}

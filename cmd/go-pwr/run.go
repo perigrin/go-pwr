@@ -30,17 +30,17 @@ const connectPause = time.Second
 
 // run reads the controller and returns the exit status. A one-shot returns 0
 // only if a reading was printed, 1 otherwise. --poll reads until SIGINT or
-// SIGTERM, and returns 0 then, or 1 if it can't start. SIGINT and SIGTERM end
+// SIGTERM, and returns 0 then, or 1 if it can't start; --follow does the same
+// over one held connection. SIGINT and SIGTERM end
 // a reading in progress, and the link is closed on the way out.
 func run(cfg config, stdout, stderr io.Writer) int {
-	if cfg.follow > 0 {
-		fmt.Fprintln(stderr, "go-pwr: --follow is not implemented")
-		return 1
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if cfg.poll > 0 {
 		return pollMode(ctx, cfg, stdout, stderr)
+	}
+	if cfg.follow > 0 {
+		return followMode(ctx, cfg, stdout, stderr)
 	}
 	return oneShot(ctx, cfg, stdout, stderr)
 }

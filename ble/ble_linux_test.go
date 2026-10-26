@@ -142,11 +142,14 @@ func TestOpenAccessDenied(t *testing.T) {
 		_, err := Open()
 		var dbusErr dbus.Error
 		t.Logf("Open() error = %v (D-Bus error: %v, %#v)", err, errors.As(err, &dbusErr), dbusErr)
-		if !errors.Is(err, ErrAccessDenied) || !errors.Is(err, ErrFatalAtStartup) {
-			t.Errorf("Open() error = %v, want ErrAccessDenied and ErrFatalAtStartup", err)
+		wrapped := fmt.Errorf("start up: %w", err)
+		for _, class := range []error{ErrNoAdapter, ErrAccessDenied, ErrBlueZNotRunning, ErrAdapterUnavailable} {
+			if got, want := errors.Is(wrapped, class), class == ErrAccessDenied; got != want {
+				t.Errorf("errors.Is(%q, %v) = %v, want %v", wrapped, class, got, want)
+			}
 		}
-		if errors.Is(err, ErrBlueZNotRunning) {
-			t.Errorf("Open() error = %v, access denied must not be told as not running", err)
+		if !errors.Is(wrapped, ErrFatalAtStartup) {
+			t.Errorf("errors.Is(%q, ErrFatalAtStartup) = false, want true", wrapped)
 		}
 		return
 	}
@@ -372,5 +375,35 @@ func TestOpenErrorClassesAreTyped(t *testing.T) {
 				t.Fatalf("adapter not powered 30s after reverting %s", tc.name)
 			}
 		})
+	}
+}
+
+// TestOpenSystemBusUnreachable runs this binary with the system bus pointed
+// at a socket that does not exist. Nothing says what that means for BlueZ,
+// so Open leaves it unclassified, but still fatal at startup.
+func TestOpenSystemBusUnreachable(t *testing.T) {
+	if os.Getenv("GO_PWR_BUS_CHILD") == "1" {
+		_, err := Open()
+		t.Logf("Open() error = %v", err)
+		if !errors.Is(err, ErrFatalAtStartup) {
+			t.Errorf("Open() error = %v, want ErrFatalAtStartup", err)
+		}
+		for _, class := range []error{ErrNoAdapter, ErrAccessDenied, ErrBlueZNotRunning, ErrAdapterUnavailable} {
+			if errors.Is(err, class) {
+				t.Errorf("Open() error = %v matches %v, want no class", err, class)
+			}
+		}
+		return
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(self, "-test.run", "^TestOpenSystemBusUnreachable$", "-test.v")
+	cmd.Env = append(os.Environ(), "GO_PWR_BUS_CHILD=1", "DBUS_SYSTEM_BUS_ADDRESS=unix:path=/nonexistent/go-pwr-test-bus")
+	out, err := cmd.CombinedOutput()
+	t.Logf("child output:\n%s", out)
+	if err != nil || !strings.Contains(string(out), "--- PASS: TestOpenSystemBusUnreachable (") {
+		t.Errorf("child run did not pass: %v", err)
 	}
 }

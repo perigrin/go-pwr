@@ -6,6 +6,7 @@ package status
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 )
 
@@ -29,7 +30,20 @@ type jsonLine struct {
 	BatteryV json.Number `json:"battery_v"`
 	SolarV   json.Number `json:"solar_v"`
 	ChargeA  json.Number `json:"charge_a"`
-	Raw      string      `json:"raw"`
+
+	ChargeState     *string `json:"charge_state"`
+	ChargeStateCode *int    `json:"charge_state_code"`
+	BatteryType     *string `json:"battery_type"`
+	BatteryTypeCode *int    `json:"battery_type_code"`
+	TempC           *int    `json:"temp_c"`
+	TempF           *int    `json:"temp_f"`
+	AhToday         *int    `json:"ah_today"`
+	AhYesterday     *int    `json:"ah_yesterday"`
+	Ah2d            *int    `json:"ah_2d"`
+	Ah3d            *int    `json:"ah_3d"`
+	Ah7d            *int    `json:"ah_7d"`
+
+	Raw string `json:"raw"`
 }
 
 // JSONLine returns the record as one JSON object followed by a single
@@ -37,19 +51,43 @@ type jsonLine struct {
 // the object can't span lines.
 func (rec Record) JSONLine() ([]byte, error) {
 	line, err := json.Marshal(jsonLine{
-		Time:     rec.Time.Format(time.RFC3339),
-		BootID:   rec.BootID,
-		UptimeS:  rec.UptimeS,
-		Device:   rec.Device,
-		BatteryV: hundredths(rec.Reading.BatteryMV),
-		SolarV:   hundredths(rec.Reading.SolarMV),
-		ChargeA:  hundredths(rec.Reading.ChargeMA),
-		Raw:      rec.Reading.Raw,
+		Time:            rec.Time.Format(time.RFC3339),
+		BootID:          rec.BootID,
+		UptimeS:         rec.UptimeS,
+		Device:          rec.Device,
+		BatteryV:        hundredths(rec.Reading.BatteryMV),
+		SolarV:          hundredths(rec.Reading.SolarMV),
+		ChargeA:         hundredths(rec.Reading.ChargeMA),
+		ChargeState:     codeNameOrNil(rec.Reading.ChargeState, ChargeStateName),
+		ChargeStateCode: rec.Reading.ChargeState,
+		BatteryType:     codeNameOrNil(rec.Reading.BatteryType, BatteryTypeName),
+		BatteryTypeCode: rec.Reading.BatteryType,
+		TempC:           rec.Reading.TempC,
+		TempF:           rec.Reading.TempF,
+		AhToday:         rec.Reading.AhToday,
+		AhYesterday:     rec.Reading.AhYesterday,
+		Ah2d:            rec.Reading.Ah2d,
+		Ah3d:            rec.Reading.Ah3d,
+		Ah7d:            rec.Reading.Ah7d,
+		Raw:             rec.Reading.Raw,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode reading: %w", err)
 	}
 	return append(line, '\n'), nil
+}
+
+// WriteJSONLine writes the record's JSON line to w in a single Write call,
+// so concurrent writers to one stream can't interleave inside a line.
+func WriteJSONLine(w io.Writer, rec Record) error {
+	line, err := rec.JSONLine()
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(line); err != nil {
+		return fmt.Errorf("write reading: %w", err)
+	}
+	return nil
 }
 
 // hundredths converts a milli-unit count to units with two decimals,
@@ -58,4 +96,14 @@ func (rec Record) JSONLine() ([]byte, error) {
 func hundredths(milli int) json.Number {
 	h := (milli + 5) / 10
 	return json.Number(fmt.Sprintf("%d.%02d", h/100, h%100))
+}
+
+// codeNameOrNil names a code with name, or gives nil when the code failed
+// to decode, so a failed field is never reported as a name.
+func codeNameOrNil(code *int, name func(int) string) *string {
+	if code == nil {
+		return nil
+	}
+	n := name(*code)
+	return &n
 }

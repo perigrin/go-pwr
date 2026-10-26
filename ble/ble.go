@@ -47,7 +47,21 @@ package ble
 import (
 	"errors"
 	"fmt"
+	"time"
 )
+
+// controllerName is the Bluetooth name the GP-PWM-30-SB advertises.
+const controllerName = "GP-PWM-30-SB"
+
+// scanWindow is how long a scan runs when it does not stop at a match. The
+// controller advertises about once a second, and on lola the slowest of 20
+// scans took 7.1 s to hear it, so 8 s is 0.9 s over the slowest seen. That
+// does not bound the tail: a present controller can still be missed, and a
+// miss is a retryable failed reading (protocol.md, "What 8 s does not
+// cover"). It is also the longest window that leaves room in the 20 s
+// default --timeout for the connect (5.9 s), the reply (3 s) and 2 s spare.
+// See "Scan window" in docs/reference/protocol.md.
+const scanWindow = 8 * time.Second
 
 // Error classes. Each is returned wrapped, so test with errors.Is.
 var (
@@ -105,6 +119,24 @@ func (e *classifiedError) Unwrap() []error {
 	}
 	return errs
 }
+
+// Controller is a charge controller that a scan found.
+type Controller struct {
+	// Address is the controller's Bluetooth address, in upper case, as BlueZ
+	// prints it.
+	Address string
+	// Connected is true when this machine already holds a link to the
+	// controller. BlueZ reports no signal strength for a connected device, so
+	// RSSI means nothing then.
+	Connected bool
+	// RSSI is the signal strength in dBm of the last advertisement seen. It
+	// is meaningful only when Connected is false.
+	RSSI int
+}
+
+// ErrNotFound is returned, wrapped, by a scan that heard no controller. With
+// an address it means that address did not show up in the whole window.
+var ErrNotFound = errors.New("controller not found")
 
 // ErrUnsupportedPlatform is returned by every operation on an operating
 // system where the Bluetooth layer has no implementation.

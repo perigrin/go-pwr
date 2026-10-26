@@ -19,6 +19,15 @@ The controller advertises:
 
 The advertisements carry **no readings**. You have to connect.
 
+### Scan window
+
+How long a scan runs when it does not stop at a match: a scan for an address that is not there, and every scan without `--mac`. It is `scanWindow` in `ble/ble.go`, **8 s**. The reasons, all measured on lola on 2026-10-26, about 2 m from the controller (RSSI −52 to −87 dBm across the scans), BlueZ 5.82:
+
+- **Advertising interval: 1 s.** With duplicate filtering off (`hcitool lescan --duplicates`, watched with `btmon`), the controller's `ADV_IND` packets arrived 13 times in 22 s. The gaps were 1.0 s five times, 2.0 s four times and 3.0 s three times, so it advertises every 1.0 s and the scanner missed some. The name `GP-PWM-30-SB` is not in the `ADV_IND`: it comes in the `SCAN_RSP` that follows within a few milliseconds, so a scan has to wait for that to tell controllers from other devices.
+- **Time to hear it through BlueZ.** `TestScanTimeToFindController` ran 20 scans for the test controller, each stopping at the match. Time to the match, sorted, in milliseconds: 737, 810, 823, 848, 863, 939, 975, 991, 1146, 1216, 1930, 2034, 2063, 2068, 2883, 4044, 4100, 4113, 4140, 7081. Median 1.6 s, slowest 7.1 s. With BlueZ's default duplicate filtering a device is reported once per scan cycle, which is why the times fall in clusters near 1, 2 and 4 s.
+- **A bound on the other side.** The default `--timeout` of 20 s counts finding the controller. The window, the connect (5.9 s to services resolved in the first look above) and the reply (`TotalTimeout`, 3 s) must fit with 2 s spare, so the window is at most 20 − 2 − 5.9 − 3 = 9.1 s. 8 s is 0.9 s over the slowest of 20 scans and 1.1 s under that bound. `TestScanWindowWithinTimeout` holds both limits. The connect issue re-checks the whole budget with go-pwr's own connect time.
+- **What 8 s does not cover.** A separate 20 s `btmon` capture of plain `bluetoothctl scan on` showed an 11 s stretch in which no device at all was reported (it followed one cluster of reports and ended with another), longer than the window. A scan that lands in such a stretch finds nothing and fails; a `--poll` reading is retried at its next interval. Whether that stretch is radio coexistence on lola's combined Wi-Fi/Bluetooth chip is not known and is for the busy-RF watch.
+
 ## Connection
 
 | Service | Characteristic | Use |

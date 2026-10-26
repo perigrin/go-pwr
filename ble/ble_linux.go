@@ -4,9 +4,12 @@
 package ble
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 	"tinygo.org/x/bluetooth"
@@ -20,6 +23,7 @@ const poweredProperty = "org.bluez.Adapter1.Powered"
 // Adapter is the local Bluetooth adapter, opened and known to be powered.
 type Adapter struct {
 	library *bluetooth.Adapter
+	conn    *dbus.Conn
 	object  dbus.BusObject
 }
 
@@ -44,7 +48,7 @@ func Open() (*Adapter, error) {
 		}
 		return nil, startupError(describe("enable adapter "+adapterName, err))
 	}
-	return &Adapter{library: library, object: object}, nil
+	return &Adapter{library: library, conn: conn, object: object}, nil
 }
 
 // Check reports whether the adapter is still there and powered. Its errors
@@ -120,4 +124,119 @@ func markWhen(when, err error) error {
 		return &copied
 	}
 	return classify(when, nil, "", err)
+}
+
+// Scan looks for controllers for the length of the scan window.
+//
+// With an address in mac, it stops as soon as that address is seen and returns
+// that controller alone; the comparison ignores case. If the window ends
+// without it, Scan returns ErrNotFound. The caller connects only after a scan,
+// because the library can connect only to a device BlueZ already has an object
+// for.
+//
+// With an empty mac, Scan always runs the whole window, never stopping at the
+// first match, and returns every controller it heard, or ErrNotFound if it
+// heard none.
+//
+// Cancelling ctx stops the scan and discovery and returns the context's
+// error. Every error matches ErrRetryable.
+func (a *Adapter) Scan(ctx context.Context, mac string) ([]Controller, error) {
+	window, cancel := context.WithTimeout(ctx, scanWindow)
+	defer cancel()
+
+	var found []Controller
+	matched := false
+	guard := newScanGuard(a.library.StopScan)
+	callback := func(_ *bluetooth.Adapter, r bluetooth.ScanResult) {
+		address := r.Address.String()
+		if mac != "" && !strings.EqualFold(address, mac) {
+			return
+		}
+		if mac == "" && r.LocalName() != controllerName {
+			return
+		}
+		found = record(found, Controller{Address: strings.ToUpper(address), RSSI: int(r.RSSI)})
+		if mac != "" {
+			matched = true
+			guard.Stop()
+		}
+	}
+
+	ended := make(chan struct{})
+	var stopper sync.WaitGroup
+	stopper.Add(1)
+	go func() {
+		defer stopper.Done()
+		stopWhenDone(window.Done(), ended, guard, stopRetry)
+	}()
+	err := recoverScan(func() error { return a.library.Scan(callback) }, guard, a.stopDiscovery)
+	close(ended)
+	stopper.Wait()
+
+	if ctx.Err() != nil {
+		return nil, retryableError(fmt.Errorf("scan: %w", ctx.Err()))
+	}
+	if err != nil && (errors.Is(err, errScanPanicked) || (!matched && window.Err() == nil)) {
+		if checkErr := a.Check(); checkErr != nil {
+			return nil, checkErr
+		}
+		return nil, retryableError(fmt.Errorf("scan: %w", err))
+	}
+	if len(found) == 0 {
+		return nil, retryableError(fmt.Errorf("scan for %s: %w", describeTarget(mac), ErrNotFound))
+	}
+	a.markConnected(found)
+	return found, nil
+}
+
+// stopRetry is how often a stop is tried again while the scan has not
+// started yet.
+const stopRetry = 50 * time.Millisecond
+
+// record adds c to found, or updates the entry with its address.
+func record(found []Controller, c Controller) []Controller {
+	for i := range found {
+		if found[i].Address == c.Address {
+			found[i].RSSI = c.RSSI
+			return found
+		}
+	}
+	return append(found, c)
+}
+
+// describeTarget names what a scan looked for.
+func describeTarget(mac string) string {
+	if mac == "" {
+		return controllerName
+	}
+	return mac
+}
+
+// markConnected sets Connected on each controller this machine already holds
+// a link to. The library presents such a device with no signal strength, so
+// its RSSI would read 0 dBm.
+func (a *Adapter) markConnected(found []Controller) {
+	for i := range found {
+		path := dbus.ObjectPath(string(a.object.Path()) + "/dev_" + strings.ReplaceAll(found[i].Address, ":", "_"))
+		connected, err := a.conn.Object("org.bluez", path).GetProperty("org.bluez.Device1.Connected")
+		if err != nil {
+			continue
+		}
+		if on, _ := connected.Value().(bool); on {
+			found[i].Connected = true
+			found[i].RSSI = 0
+		}
+	}
+}
+
+// stopDiscovery asks BlueZ to stop discovering. Not discovering is fine.
+// BlueZ tracks discovery per D-Bus client, so this stops the library's
+// discovery only because a.object rides the same shared dbus.SystemBus()
+// connection the library starts discovery on.
+func (a *Adapter) stopDiscovery() error {
+	err := a.object.Call("org.bluez.Adapter1.StopDiscovery", 0).Err
+	if err != nil && strings.Contains(err.Error(), "No discovery started") {
+		return nil
+	}
+	return err
 }

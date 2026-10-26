@@ -34,6 +34,16 @@ ssh lola 'sudo -n systemctl unmask --runtime bluetooth.service; sudo -n rfkill u
 
 Then check that lola is as it was: bluetooth active and not masked, `/sys/class/bluetooth/hci0` present, `bluetoothctl show` says `Powered: yes`, `/usr/sbin/rfkill list bluetooth` blocks nothing (plain `rfkill` is not on the ssh user's PATH), and `/etc/dbus-1/system.d/zz-go-pwr-test-deny.conf` is gone.
 
+## Race testing
+
+`go test -race` does not run on lola's target: `GOOS=linux GOARCH=arm GOARM=6 go test -race` exits 2, because the race detector does not support linux/arm. So race testing runs on the Mac, on the platform-neutral code that holds the concurrency. For the `ble` package that is the scan guard (`ble/scanguard.go`):
+
+```
+go test -race -count=1 -run TestScanGuard ./ble
+```
+
+(perigrin's decision, owner decision 10.) The hardware side, the library's own `StopScan` and `Scan` against real BlueZ, is covered by the tests that run on lola without `-race`. The library's `StopScan` and `Scan` share the unlocked `scanCancelChan` field, which the guard serialises only on go-pwr's side, so no tool here proves the library itself race-free.
+
 ## Branching
 
 Create feature branches from `main`. Merge back to `main` through a pull request.

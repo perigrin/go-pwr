@@ -23,8 +23,14 @@ import (
 //   - 2.0 °F: true −0.99 °C (30.2 °F). °C truncated to 0 (expected 32 °F);
 //     °F truncated to 30. The truncation-toward-zero case seen near freezing.
 //   - 1.4 °F: the worst gap when both fields are rounded (any of the three
-//     rounding modes), against 2.6 °F when both truncate.
+//     rounding modes), against 2.6 °F when °C truncates toward zero and °F
+//     floors, which err in opposite directions below zero.
 //   - 0.4 °F: the real capture, +22 °C / +72 °F against an expected 71.6 °F.
+//
+// 13 fifths also covers any rounding mode outside the sweep: a whole-degree
+// °C is off by less than 1 °C (1.8 °F) and a whole-degree °F by less than
+// 1 °F, so the gap is under 2.8 °F, and since 5·°F − (9·°C + 160) is a whole
+// number, the gap in fifths is at most 13.
 //
 // 5·°F − (9·°C + 160) is always a whole number, and the gap in fifths is
 // compared as integers, so there is no float rounding at the boundary.

@@ -129,7 +129,7 @@ The controller reports each temperature as a whole number, and which way it roun
 
 | Gap | Case |
 |---|---|
-| 2.6 °F | True −38.99 °C (−38.18 °F). °C truncated toward zero gives −38 (expected −36.4 °F) and °F floored gives −39. This is the worst mix: both truncating. |
+| 2.6 °F | True −38.99 °C (−38.18 °F). °C truncated toward zero gives −38 (expected −36.4 °F) and °F floored gives −39. This is the worst mix: °C truncated toward zero and °F floored, which err in opposite directions below zero. Any rounding mode at all stays within 2.6 °F: each whole-degree report is off by less than 1 °C (1.8 °F) or 1 °F, so the gap is under 2.8 °F, and in fifths of a degree it is a whole number. |
 | 2.0 °F | True −0.99 °C (30.2 °F). °C truncated to `0` (expected 32 °F) and °F truncated to `30`. The worst case at freezing. |
 | 1.4 °F | The worst gap when both fields are rounded, in any of the three rounding modes. |
 | 0.4 °F | The real capture: `+22` °C and `+72` °F against an expected 71.6 °F. |

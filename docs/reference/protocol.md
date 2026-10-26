@@ -234,7 +234,7 @@ Three of about 45 connects failed with BlueZ's `le-connection-abort-by-local` af
 
 Service discovery is not the bottleneck the library's hard-wired 10 s `ServicesResolved` poll suggested: BlueZ resolves the services during the connect, so the poll found them resolved at once or within about a second. `go-pwr` documents the breakdown and does not watch `ServicesResolved` itself.
 
-Close takes 2–5 s. It runs after the reply, bounded by `closeBound` (5 s), and `--timeout` bounds the reading, not the disconnect.
+Close takes 2–5 s. It runs after the reply, bounded by `closeBound` (10 s, twice the slowest close measured), and `--timeout` bounds the reading, not the disconnect.
 
 ### Handle map
 

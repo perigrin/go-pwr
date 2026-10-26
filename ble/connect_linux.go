@@ -5,6 +5,7 @@ package ble
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -19,11 +20,6 @@ const (
 	connectedProperty = "org.bluez.Device1.Connected"
 	unknownObject     = "org.freedesktop.DBus.Error.UnknownObject"
 )
-
-// closeBound is the longest Close waits for BlueZ to report the link down.
-// BlueZ takes under a second to drop a link, so this is generous, and it is
-// well inside the time a reading has left after its reply.
-const closeBound = 5 * time.Second
 
 // pollInterval is how often the Connected property is read while waiting for
 // it to change.
@@ -63,11 +59,16 @@ func (a *Adapter) Connect(ctx context.Context, mac string) (*Connection, error) 
 	object := a.conn.Object("org.bluez", devicePath(a, mac))
 	if err := a.connect(ctx, object); err != nil {
 		if ctx.Err() != nil {
-			a.abandon(object)
-			return nil, retryableError(fmt.Errorf("connect %s: %w", mac, ctx.Err()))
+			return nil, a.abandoned(object, mac, ctx.Err())
 		}
-		if checkErr := a.Check(); checkErr != nil {
+		if checkErr := a.checkContext(ctx); checkErr != nil {
+			if ctx.Err() != nil {
+				return nil, a.abandoned(object, mac, ctx.Err())
+			}
 			return nil, checkErr
+		}
+		if dbusErrorName(err) == unknownObject {
+			return nil, retryableError(classify(nil, ErrNotFound, "connect "+mac+": BlueZ has no such device, scan for it first", err))
 		}
 		return nil, retryableError(describe("connect "+mac, err))
 	}
@@ -83,10 +84,16 @@ func (a *Adapter) connect(ctx context.Context, object dbus.BusObject) error {
 	return object.CallWithContext(ctx, deviceInterface+".Connect", 0).Err
 }
 
-// abandon drops a connect that ctx cut short, whichever way BlueZ was
-// getting on with it. It runs on a context of its own, since ctx is done.
-func (a *Adapter) abandon(object dbus.BusObject) {
-	_ = disconnect(object)
+// abandoned drops a connect that ctx cut short, whichever way BlueZ was
+// getting on with it, and returns the error for it: the context's error,
+// joined with the cleanup's own error if BlueZ would not disconnect. The
+// cleanup runs on a context of its own, since ctx is done.
+func (a *Adapter) abandoned(object dbus.BusObject, mac string, ctxErr error) error {
+	err := fmt.Errorf("connect %s: %w", mac, ctxErr)
+	if cleanup := disconnect(object); cleanup != nil {
+		err = errors.Join(err, fmt.Errorf("abandon connect: %w", cleanup))
+	}
+	return retryableError(err)
 }
 
 // connected reads the Connected property of a device, which is false for a

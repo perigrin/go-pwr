@@ -81,6 +81,13 @@ const controllerName = "GP-PWM-30-SB"
 // lola" in docs/reference/protocol.md.
 const scanWindow = 8 * time.Second
 
+// closeBound is the longest Close waits for BlueZ to report the link down.
+// BlueZ took 2.3 to 4.6 s to drop the link in 40 runs on lola, so 10 s is
+// twice the slowest. Close runs after the reply, so the wait does not count
+// against the reading's --timeout. See "Time budget on lola" in
+// docs/reference/protocol.md.
+const closeBound = 10 * time.Second
+
 // Error classes. Each is returned wrapped, so test with errors.Is.
 var (
 	// ErrNoAdapter means BlueZ has no adapter, or the adapter has vanished.
@@ -153,7 +160,9 @@ type Controller struct {
 }
 
 // ErrNotFound is returned, wrapped, by a scan that heard no controller. With
-// an address it means that address did not show up in the whole window.
+// an address it means that address did not show up in the whole window. Connect
+// returns it for an address BlueZ has no device for, because no scan has found
+// it.
 var ErrNotFound = errors.New("controller not found")
 
 // ErrUnsupportedPlatform is returned by every operation on an operating

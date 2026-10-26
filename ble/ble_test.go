@@ -76,3 +76,15 @@ func TestScanWindowWithinTimeout(t *testing.T) {
 			slowestMacScan, slowestConnect, status.TotalTimeout, total, defaultTimeout)
 	}
 }
+
+// slowestClose is the slowest Close of 40 runs on lola ("Time budget on
+// lola" in docs/reference/protocol.md).
+const slowestClose = 4610 * time.Millisecond
+
+// TestCloseBoundHasMargin holds the wait for a link to drop to twice the
+// slowest disconnect measured, since one night on one controller is no bound.
+func TestCloseBoundHasMargin(t *testing.T) {
+	if closeBound < 2*slowestClose {
+		t.Errorf("closeBound = %v, want at least twice the slowest close measured (%v)", closeBound, slowestClose)
+	}
+}

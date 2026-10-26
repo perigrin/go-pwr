@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbus/dbus/v5"
 	"github.com/perigrin/go-pwr/status"
 	"tinygo.org/x/bluetooth"
 )
@@ -321,8 +322,11 @@ func TestConnectAbsentDeviceErrors(t *testing.T) {
 		conn.Close()
 		t.Fatalf("Connect() to absent %s made a link", absent)
 	}
-	if err == nil || !errors.Is(err, ErrRetryable) {
-		t.Errorf("Connect() error = %v, want an ErrRetryable error", err)
+	if !errors.Is(err, ErrNotFound) || !errors.Is(err, ErrRetryable) {
+		t.Errorf("Connect() error = %v, want ErrNotFound and ErrRetryable", err)
+	}
+	if errors.Is(err, ErrNoAdapter) {
+		t.Errorf("Connect() error = %v, an unknown device is not a missing adapter", err)
 	}
 	if took >= deadline {
 		t.Errorf("Connect() took %v, want an error before the %v deadline", took, deadline)
@@ -456,5 +460,52 @@ func TestCloseAfterRemoteDrop(t *testing.T) {
 	}
 	if took > closeBound/5 {
 		t.Errorf("Close() took %v, want it prompt, well under its %v bound", took, closeBound)
+	}
+}
+
+// failingDisconnect is a BlueZ device object whose every call fails, to make
+// a cleanup that cannot disconnect. A real failure is not reproducible on
+// demand: BlueZ answers Disconnect for any known device (owner decision 11).
+// It is never used to show that a connect or a reading is accepted.
+type failingDisconnect struct {
+	dbus.BusObject
+}
+
+func (failingDisconnect) CallWithContext(ctx context.Context, method string, flags dbus.Flags, args ...interface{}) *dbus.Call {
+	return &dbus.Call{Err: errors.New("disconnect refused")}
+}
+
+func TestAbandonedConnectReportsFailedCleanup(t *testing.T) {
+	adapter := &Adapter{}
+	err := adapter.abandoned(failingDisconnect{}, "C3:00:00:58:51:40", context.DeadlineExceeded)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrRetryable) {
+		t.Errorf("abandoned() error = %v, want DeadlineExceeded and ErrRetryable", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "disconnect refused") {
+		t.Errorf("abandoned() error = %v, want it to say the cleanup failed", err)
+	}
+}
+
+func TestCheckHonoursContext(t *testing.T) {
+	requireRoot(t)
+	restoreOnCleanup(t)
+	adapter, err := Open()
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	// Masked BlueZ takes about 15 s to fail a property read.
+	stopBlueZ(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	started := time.Now()
+	err = adapter.checkContext(ctx)
+	took := time.Since(started)
+	t.Logf("checkContext() = %v after %v", err, took.Round(time.Millisecond))
+	if !errors.Is(err, ErrRetryable) {
+		t.Errorf("checkContext() error = %v, want ErrRetryable", err)
+	}
+	if took > 4*time.Second {
+		t.Errorf("checkContext() took %v, want it to stop at its 2 s context", took)
 	}
 }

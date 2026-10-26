@@ -19,7 +19,7 @@ var (
 	// unaffected.
 	errBeforeRequest = errors.New("notification predates the request")
 	// errHoldFull: too many notifications arrived before the request was
-	// bounded. The extra one is dropped.
+	// bounded. The read fails, since a lost notification could leave a gap.
 	errHoldFull = errors.New("too many notifications before the request was bounded")
 	// errBoundTwice: bound was called twice for one read.
 	errBoundTwice = errors.New("read already has its boundary")
@@ -51,7 +51,8 @@ type heldNotification struct {
 //     are added in order, and bound returns the reply so far;
 //   - after bound(b): k <= b is dropped, anything above b is added.
 //
-// A drop is reported to dropped, never fails the read. A held notification
+// A drop is reported to dropped and never fails the read, except that more
+// than maxHeld held notifications fail it with errHoldFull. A held notification
 // that fails the assembler's own rules (keys not increasing) fails the read
 // at bound. begin discards whatever the previous read held or assembled.
 type readBuffer struct {
@@ -62,6 +63,7 @@ type readBuffer struct {
 	bounded  bool
 	boundary uint64
 	held     []heldNotification
+	failed   error // set when the read can no longer be trusted
 }
 
 // newReadBuffer returns a buffer with no read begun. dropped, which may be
@@ -80,6 +82,7 @@ func (b *readBuffer) begin() {
 	b.bounded = false
 	b.boundary = 0
 	b.held = nil
+	b.failed = nil
 }
 
 // bound sets the boundary of the current read to the sequence of the
@@ -88,6 +91,9 @@ func (b *readBuffer) begin() {
 func (b *readBuffer) bound(seq dbus.Sequence) (string, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.failed != nil {
+		return "", false, b.failed
+	}
 	if b.bounded {
 		return "", false, errBoundTwice
 	}
@@ -114,10 +120,17 @@ func (b *readBuffer) bound(seq dbus.Sequence) (string, bool, error) {
 func (b *readBuffer) add(key uint64, chunk []byte) (string, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.failed != nil {
+		return "", false, b.failed
+	}
 	if !b.bounded {
 		if len(b.held) >= maxHeld {
-			b.drop(fmt.Errorf("%w: key %d", errHoldFull, key))
-			return "", false, nil
+			// Losing a held notification could leave a gap that still
+			// assembles, so the whole read fails.
+			b.failed = fmt.Errorf("%w: key %d", errHoldFull, key)
+			b.held = nil
+			b.drop(b.failed)
+			return "", false, b.failed
 		}
 		b.held = append(b.held, heldNotification{key, append([]byte(nil), chunk...)})
 		return "", false, nil

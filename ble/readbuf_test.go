@@ -180,3 +180,42 @@ func TestReadBufferBoundTwice(t *testing.T) {
 		t.Errorf("second bound returned %v, want errBoundTwice", err)
 	}
 }
+
+// TestReadBufferHoldOverflowFailsRead: more than maxHeld notifications
+// before bound fail the read. The overflow is reported, a real reply
+// delivered afterwards never comes out whole, bound and add return
+// errHoldFull, and the next begin starts clean.
+func TestReadBufferHoldOverflowFailsRead(t *testing.T) {
+	chunks, want := realReply(t, 1)
+	b, drops := dropCounter()
+	b.begin()
+	key := uint64(1)
+	for range maxHeld + 1 {
+		if _, _, err := b.add(key, []byte("x")); err != nil && !errors.Is(err, errHoldFull) {
+			t.Fatal(err)
+		}
+		key++
+	}
+	if len(*drops) == 0 || !errors.Is((*drops)[0], errHoldFull) {
+		t.Errorf("overflow not reported: %v", *drops)
+	}
+	for _, c := range chunks {
+		reply, whole, err := b.add(key, c)
+		key++
+		if whole || !errors.Is(err, errHoldFull) {
+			t.Fatalf("add after overflow = %q whole %v err %v, want errHoldFull", reply, whole, err)
+		}
+	}
+	if reply, whole, err := b.bound(5); whole || !errors.Is(err, errHoldFull) {
+		t.Fatalf("bound after overflow = %q whole %v err %v, want errHoldFull", reply, whole, err)
+	}
+
+	b.begin()
+	if _, _, err := b.bound(1000); err != nil {
+		t.Fatal(err)
+	}
+	reply, whole := feed(t, b, 1001, chunks)
+	if !whole || reply != want {
+		t.Fatalf("read after overflow = %q (whole %v), want %q", reply, whole, want)
+	}
+}

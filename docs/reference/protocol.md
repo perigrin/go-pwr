@@ -121,6 +121,47 @@ Only three fields can fail a reading on their values: charge current (index 0), 
 
 A sign of either kind, an empty field, embedded spaces, hexadecimal or non-ASCII digits, or more than five digits fail the reading.
 
+## Notification sizes and timing on lola
+
+Measured on 2026-10-25 at 22:08–22:10 EDT on lola (Raspberry Pi Zero W, BCM43438, BlueZ 5.82, kernel 6.18), about 2 m from the controller (RSSI −68 dBm), at night: battery 13.18–13.19 V, PV 0.65 V, no charge current. The trace is `status/testdata/lola-timing/session-1.btsnoop`, its `btmon -r` decoding is beside it, and each reply's notifications are in `session-1-reply-NN.seq.txt` (line 1 names the trace; every other line is microseconds since the request write, then the payload in hex). 21 replies: four fresh connections of two replies each, then one held connection of 13. BlueZ's GATT cache was cleared first (`bluetoothctl remove`), so the first connection includes service discovery. Confidence: **observed** on this one night, one adapter and one controller.
+
+**Framing: the reply is not what the 2026-10-25 afternoon capture shows.** Every one of the 21 replies is 169 bytes: a leading space (`0x20`, which looks like the controller echoing the request), the 166-byte body ending in `;`, then `\r\n`. For example:
+
+```
+ 00000;000;13187;14525;00000;00003;00183;39402;00008;003;100;00645;000;00000;00019;00049;+20;+68;+20;00000;00015;00015;00016;00080;00133;00000;02309;02025;009;025;008;\r\n
+```
+
+Split on `;`, that is still 32 fields, but the first is ` 00000` and the last is `\r\n`, not empty. The afternoon capture in **Example reply** is the 166-byte body alone. How it was taken is not recorded, so whether the controller sent the space and `\r\n` then is unknown. A trailing `\r\n` would be a natural end-of-reply marker.
+
+- **ATT MTU: 23.** BlueZ offers 517 in Exchange MTU, and the controller answers 23. So notifications carry at most 20 bytes, like the phone app's.
+- **Sizes:** every reply is nine notifications, 8 × 20 bytes plus one of 9.
+- **Timing:** notifications arrive in pairs, one pair per 30 ms connection event (the controller asks for a 20–30 ms interval). From the request write to the first notification: 33–96 ms, median 48 ms. To the last: 123–202 ms, median 142 ms. Gaps between notifications in a reply: median 1.4 ms, 90th percentile 29.5 ms, longest 88 ms. Across 168 gaps: 103 under 4 ms, 42 near 30 ms, 7 near 22.5 ms, 7 near 7.5 ms, and 9 between 37.5 and 90 ms.
+- **Connect (first look, by `bluetoothctl connect` and polling `ServicesResolved` in a script; the go-pwr budget is measured in the connect issue):** the controller was seen 1.3 s into a scan. From connect to services resolved: 5.9 s with discovery, then 5.5, 2.5, 2.6 and 3.5 s with the cache warm.
+
+### Handle map
+
+From the discovery on the first connection (Read By Group Type, Read By Type and Find Information):
+
+| Handle | What |
+|---|---|
+| `0x0001`–`0x0007` | Generic Access service (`0x1800`): Device Name value `0x0003`, Appearance `0x0005`, Peripheral Preferred Connection Parameters `0x0007` |
+| `0x0008`–`0x000b` | Generic Attribute service (`0x1801`): Service Changed declaration `0x0009`, value `0x000a`, its CCCD `0x000b` |
+| `0x000c`–`0xffff` | Service `FFF0` |
+| `0x000d` / `0x000e` | `FFF1` declaration / value (notify) |
+| `0x000f` | `FFF1` CCCD |
+| `0x0010` / `0x0011` | `FFF2` declaration / value (write, write without response) |
+
+There is **no `FFE1` GATT service**. `FFE1` appears only as the advertisement's service-data UUID.
+
+### Writes in the trace
+
+Every write in the trace, by handle:
+
+- `0x0011` (`FFF2`): 21 Write Requests, each exactly `20`.
+- `0x000f` (`FFF1` CCCD): `0100` (notifications on) 5 times, `0000` (off) 5 times.
+- `0x000b` (Service Changed CCCD): `0200` (indications on) once per connection, 5 times. **BlueZ writes this itself**, without being asked.
+- BlueZ did **not** write Client Supported Features (`0x2B29`). The controller's GATT service has no such characteristic.
+
 ## Other writes: do not send
 
 `FFF2` is the input to a serial bridge. The app's other commands are ASCII strings sent **one character per write**, so the controller is parsing a character stream. That makes any stray byte on `FFF2` potentially part of a command. A monitoring client should write only the single byte `0x20`.

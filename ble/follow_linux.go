@@ -87,12 +87,13 @@ func (f *Follower) Read(ctx context.Context) (string, error) {
 	return "", f.abandoned(err)
 }
 
-// establish scans for the controller and connects to it.
+// establish scans for the controller and connects to it, trying again after
+// a connect that fails (see ConnectWithRetry).
 func (f *Follower) establish(ctx context.Context) (*Conn, error) {
 	if _, err := f.adapter.Scan(ctx, f.mac); err != nil {
 		return nil, err
 	}
-	conn, err := f.adapter.Connect(ctx, f.mac)
+	conn, err := f.adapter.ConnectWithRetry(ctx, f.mac)
 	if err != nil {
 		return nil, err
 	}

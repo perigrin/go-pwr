@@ -74,9 +74,11 @@ const controllerName = "GP-PWM-30-SB"
 // scans took 7.1 s to hear it, so 8 s is 0.9 s over the slowest seen. That
 // does not bound the tail: a present controller can still be missed, and a
 // miss is a retryable failed reading (protocol.md, "What 8 s does not
-// cover"). It is also the longest window that leaves room in the 20 s
-// default --timeout for the connect (5.9 s), the reply (3 s) and 2 s spare.
-// See "Scan window" in docs/reference/protocol.md.
+// cover"). With --mac the scan stops at the match (4.4 s at worst), so the
+// scan, the connect (9.8 s at worst) and the reply (3 s) fit the 20 s default
+// --timeout. Without --mac the whole window runs, and a one-shot can exceed
+// 20 s and fail as a retryable reading. See "Scan window" and "Time budget on
+// lola" in docs/reference/protocol.md.
 const scanWindow = 8 * time.Second
 
 // Error classes. Each is returned wrapped, so test with errors.Is.

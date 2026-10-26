@@ -3,4 +3,4 @@
 
 package ble
 
-var statusRequest = []byte{0x20}
+const statusRequest byte = 0x20

@@ -27,8 +27,8 @@
 //
 // RequestStatus is the only operation that writes to the controller, and
 // it takes no bytes. There is no function that does. The request is the
-// package variable statusRequest, one byte, 0x20, passed at the one GATT
-// write call site, and TestSingleStatusWriteCallSite and
+// constant statusRequest, one byte, 0x20, passed as []byte{statusRequest} at
+// the one GATT write call site, and TestSingleStatusWriteCallSite and
 // TestNoExportedByteWriter guard both.
 //
 // Before every write, RequestStatus checks that its target is the
@@ -100,10 +100,11 @@ import (
 )
 
 // statusRequest is the one value this package ever writes to the controller's
-// FFF2 characteristic: a single space, which asks for a status reply. It is
-// passed, as this variable, at the one GATT write call site, and
-// TestSingleStatusWriteCallSite holds both facts.
-var statusRequest = []byte{0x20}
+// FFF2 characteristic: a single space, which asks for a status reply. It is a
+// constant, so no code can change it, and it is passed as []byte{statusRequest}
+// at the one GATT write call site. TestSingleStatusWriteCallSite holds that,
+// and that the name is declared and used nowhere else.
+const statusRequest byte = 0x20
 
 // controllerName is the Bluetooth name the GP-PWM-30-SB advertises.
 const controllerName = "GP-PWM-30-SB"

@@ -459,7 +459,7 @@ func stringProperty(ctx context.Context, object dbus.BusObject, iface, name stri
 // statusRequest, always. TestSingleStatusWriteCallSite holds both facts.
 func (t writeTarget) send(ctx context.Context) *dbus.Call {
 	options := map[string]dbus.Variant{"type": dbus.MakeVariant("request")}
-	return t.object.CallWithContext(ctx, "org.bluez.GattCharacteristic1.WriteValue", 0, statusRequest, options)
+	return t.object.CallWithContext(ctx, "org.bluez.GattCharacteristic1.WriteValue", 0, []byte{statusRequest}, options)
 }
 
 // close turns notifications off, if they were asked for, and closes the

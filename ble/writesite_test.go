@@ -24,36 +24,39 @@ var writeMethodNames = map[string]bool{
 	"AcquireWrite":         true,
 }
 
-// writeCallNames are the D-Bus method names, as they appear in a string, that
-// write a GATT value.
-var writeCallNames = []string{
-	"org.bluez.GattCharacteristic1.WriteValue",
-	"org.bluez.GattCharacteristic1.AcquireWrite",
-	"GattCharacteristic1.WriteValue",
-	"GattCharacteristic1.AcquireWrite",
-}
+// writeCallNames are the names that, anywhere in a string used as a D-Bus
+// method name, make the call a GATT write.
+var writeCallNames = []string{"WriteValue", "AcquireWrite"}
 
-// requestVariable is the one value ble may write.
-const requestVariable = "statusRequest"
+// requestName is the one value ble may write, a constant.
+const requestName = "statusRequest"
 
 // checkWriteSites parses the non-test Go files in dir and returns one
 // description per breach of the write rule. It fails closed: a file that
 // does not parse, or a dir with no non-test Go files, is an error rather than
 // an empty result. A dir that holds no write site, or no declaration of
-// statusRequest as []byte{0x20}, breaches the rule too.
+// statusRequest as a byte constant of 0x20, breaches the rule too.
 //
-// The rule: exactly one write site, which is a method call named Write,
-// WriteWithoutResponse, WriteValue or AcquireWrite, or a call that has one of
-// the D-Bus names of those as a string literal argument; its value argument
-// is the identifier statusRequest; and statusRequest is declared once as
-// []byte{0x20} and never assigned to again.
+// The rule:
+//   - exactly one write site: a method call named Write, WriteWithoutResponse,
+//     WriteValue or AcquireWrite, or a call with an argument that is a string,
+//     or strings joined with +, containing WriteValue or AcquireWrite;
+//   - its value argument is exactly the literal []byte{statusRequest};
+//   - statusRequest is declared once, at the top level of a file, as
+//     const statusRequest byte = 0x20;
+//   - the name statusRequest is declared nowhere else (no local, parameter,
+//     result, range variable, field, type or function of that name) and is
+//     used nowhere except in that one literal, so it is never copied,
+//     appended, aliased or addressed.
 //
 // Build constraints are ignored, so files for every platform are checked.
 // Test files are skipped because they are not part of the package.
 //
-// Blind spots, by design: a D-Bus method name built at run time or held in a
-// variable, a write through a function value, and a call made by reflection
-// are not seen. Code review covers them, with TestNoExportedByteWriter.
+// Blind spots, by design: a D-Bus method name built from pieces that are not
+// literals, a write through a helper that passes bytes along or through a
+// function value, another package, a call made by reflection, and a
+// writeTarget literal made elsewhere in the package are not seen. Code review
+// covers them, with TestNoExportedByteWriter.
 func checkWriteSites(dir string) ([]string, error) {
 	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
@@ -80,9 +83,11 @@ func checkWriteSites(dir string) ([]string, error) {
 		problems = append(problems, fmt.Sprintf("%s: %s", fset.Position(pos), fmt.Sprintf(format, args...)))
 	}
 
+	topLevel := map[token.Pos]bool{} // the name in a top-level declaration
+	allowed := map[token.Pos]bool{}  // the use inside a write's argument
+	named := map[token.Pos]bool{}    // string literals inside a recognised call
 	declarations := 0
 	sites := 0
-	named := map[token.Pos]bool{} // string literals inside a recognised call
 	for _, file := range files {
 		for _, decl := range file.Decls {
 			gen, ok := decl.(*ast.GenDecl)
@@ -92,45 +97,44 @@ func checkWriteSites(dir string) ([]string, error) {
 			for _, spec := range gen.Specs {
 				vs := spec.(*ast.ValueSpec)
 				for i, name := range vs.Names {
-					if name.Name != requestVariable {
+					if name.Name != requestName {
 						continue
 					}
 					declarations++
-					if gen.Tok != token.VAR || i >= len(vs.Values) || !isStatusRequestValue(vs.Values[i]) {
-						report(name.Pos(), "%s is not declared as var %s = []byte{0x20}", requestVariable, requestVariable)
+					topLevel[name.Pos()] = true
+					if gen.Tok != token.CONST || !isRequestValue(vs, i) {
+						report(name.Pos(), "%s is not declared as const %s byte = 0x20", requestName, requestName)
 					}
 				}
 			}
 		}
 		ast.Inspect(file, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.CallExpr:
-				if arg, found := writeValueArgument(n, named); found {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if arg, found := writeValueArgument(call, named); found {
 					sites++
-					if id, ok := arg.(*ast.Ident); !ok || id.Name != requestVariable {
-						report(n.Pos(), "write site passes %s, want %s", describeArgument(arg), requestVariable)
+					if elt := requestLiteral(arg); elt != nil {
+						allowed[elt.Pos()] = true
+					} else {
+						report(call.Pos(), "write site passes %s, want []byte{%s}", describeArgument(arg), requestName)
 					}
-				}
-			case *ast.AssignStmt:
-				for _, lhs := range n.Lhs {
-					if assignsRequest(lhs) {
-						report(n.Pos(), "%s is assigned to", requestVariable)
-					}
-				}
-			case *ast.IncDecStmt:
-				if assignsRequest(n.X) {
-					report(n.Pos(), "%s is changed", requestVariable)
 				}
 			}
 			return true
 		})
 	}
-	// A D-Bus write name that no recognised call uses is a write the guard
-	// cannot see the value of.
 	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
-			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && !named[lit.Pos()] && namesWrite(lit) {
-				report(lit.Pos(), "%s names a GATT write outside a call the guard can check", lit.Value)
+			switch n := n.(type) {
+			case *ast.Ident:
+				if n.Name == requestName && !topLevel[n.Pos()] && !allowed[n.Pos()] {
+					report(n.Pos(), "%s is declared or used outside the one write", requestName)
+				}
+			case *ast.BasicLit:
+				// A D-Bus write name that no recognised call uses is a write
+				// the guard cannot see the value of.
+				if n.Kind == token.STRING && !named[n.Pos()] && namesWrite(n) {
+					report(n.Pos(), "%s names a GATT write outside a call the guard can check", n.Value)
+				}
 			}
 			return true
 		})
@@ -138,9 +142,9 @@ func checkWriteSites(dir string) ([]string, error) {
 
 	switch {
 	case declarations == 0:
-		problems = append(problems, fmt.Sprintf("%s is not declared", requestVariable))
+		problems = append(problems, fmt.Sprintf("%s is not declared", requestName))
 	case declarations > 1:
-		problems = append(problems, fmt.Sprintf("%s is declared %d times", requestVariable, declarations))
+		problems = append(problems, fmt.Sprintf("%s is declared %d times", requestName, declarations))
 	}
 	if sites != 1 {
 		problems = append(problems, fmt.Sprintf("found %d GATT write sites, want exactly 1", sites))
@@ -148,25 +152,38 @@ func checkWriteSites(dir string) ([]string, error) {
 	return problems, nil
 }
 
-// isStatusRequestValue reports whether expr is exactly []byte{0x20}.
-func isStatusRequestValue(expr ast.Expr) bool {
-	lit, ok := expr.(*ast.CompositeLit)
-	if !ok || len(lit.Elts) != 1 {
+// isRequestValue reports whether name i of vs is declared with type byte and
+// the value 0x20.
+func isRequestValue(vs *ast.ValueSpec, i int) bool {
+	if typ, ok := vs.Type.(*ast.Ident); !ok || typ.Name != "byte" || i >= len(vs.Values) {
 		return false
 	}
-	arr, ok := lit.Type.(*ast.ArrayType)
-	if !ok || arr.Len != nil {
-		return false
-	}
-	if elem, ok := arr.Elt.(*ast.Ident); !ok || elem.Name != "byte" {
-		return false
-	}
-	value, ok := lit.Elts[0].(*ast.BasicLit)
+	value, ok := vs.Values[i].(*ast.BasicLit)
 	if !ok || value.Kind != token.INT {
 		return false
 	}
 	n, err := strconv.ParseUint(value.Value, 0, 8)
 	return err == nil && n == 0x20
+}
+
+// requestLiteral returns the statusRequest identifier in expr when expr is
+// exactly []byte{statusRequest}, and nil otherwise.
+func requestLiteral(expr ast.Expr) *ast.Ident {
+	lit, ok := expr.(*ast.CompositeLit)
+	if !ok || len(lit.Elts) != 1 {
+		return nil
+	}
+	arr, ok := lit.Type.(*ast.ArrayType)
+	if !ok || arr.Len != nil {
+		return nil
+	}
+	if elem, ok := arr.Elt.(*ast.Ident); !ok || elem.Name != "byte" {
+		return nil
+	}
+	if id, ok := lit.Elts[0].(*ast.Ident); ok && id.Name == requestName {
+		return id
+	}
+	return nil
 }
 
 // writeValueArgument returns the value argument of call when call is a GATT
@@ -179,11 +196,13 @@ func writeValueArgument(call *ast.CallExpr, named map[token.Pos]bool) (ast.Expr,
 		return call.Args[0], true
 	}
 	for i, arg := range call.Args {
-		lit, ok := arg.(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING || !namesWrite(lit) {
+		lits := writeLiterals(arg)
+		if len(lits) == 0 {
 			continue
 		}
-		named[lit.Pos()] = true
+		for _, lit := range lits {
+			named[lit.Pos()] = true
+		}
 		// A D-Bus call is (method, flags, args...), after a context for the
 		// context-aware forms, and Go also takes a channel before the args.
 		// The value is the first argument after the flags in every form the
@@ -196,7 +215,26 @@ func writeValueArgument(call *ast.CallExpr, named map[token.Pos]bool) (ast.Expr,
 	return nil, false
 }
 
-// namesWrite reports whether the string literal names a GATT write method.
+// writeLiterals returns the string literals in expr that name a GATT write,
+// looking through + and parentheses, so that iface+".WriteValue" is seen.
+func writeLiterals(expr ast.Expr) []*ast.BasicLit {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		if e.Kind == token.STRING && namesWrite(e) {
+			return []*ast.BasicLit{e}
+		}
+	case *ast.BinaryExpr:
+		if e.Op == token.ADD {
+			return append(writeLiterals(e.X), writeLiterals(e.Y)...)
+		}
+	case *ast.ParenExpr:
+		return writeLiterals(e.X)
+	}
+	return nil
+}
+
+// namesWrite reports whether the string literal contains the name of a GATT
+// write method.
 func namesWrite(lit *ast.BasicLit) bool {
 	text, err := strconv.Unquote(lit.Value)
 	if err != nil {
@@ -210,25 +248,6 @@ func namesWrite(lit *ast.BasicLit) bool {
 	return false
 }
 
-// assignsRequest reports whether expr is statusRequest or one of its
-// elements, as the left side of an assignment.
-func assignsRequest(expr ast.Expr) bool {
-	for {
-		switch e := expr.(type) {
-		case *ast.Ident:
-			return e.Name == requestVariable
-		case *ast.IndexExpr:
-			expr = e.X
-		case *ast.SliceExpr:
-			expr = e.X
-		case *ast.ParenExpr:
-			expr = e.X
-		default:
-			return false
-		}
-	}
-}
-
 // describeArgument says briefly what expr is, for a message.
 func describeArgument(expr ast.Expr) string {
 	switch e := expr.(type) {
@@ -237,7 +256,7 @@ func describeArgument(expr ast.Expr) string {
 	case *ast.BasicLit:
 		return e.Value
 	case *ast.CompositeLit:
-		return "a literal"
+		return "another literal"
 	case *ast.BadExpr:
 		return "nothing"
 	}
@@ -259,9 +278,13 @@ func TestSingleStatusWriteCallSite(t *testing.T) {
 // so the guard is shown to fail when it should and to pass when it should.
 func TestSingleStatusWriteCallSiteFailsClosed(t *testing.T) {
 	for _, name := range []string{
-		"second-write", "second-dbus-write", "literal-argument", "other-value",
-		"no-write", "element-assigned", "name-outside-call", "acquire-write",
-		"other-identifier", "declared-twice", "declared-const",
+		"second-write", "second-dbus-write", "second-concatenated-write",
+		"concatenated-write-other-value", "bare-name-write", "literal-argument",
+		"bare-constant-argument", "two-byte-argument", "other-value", "no-write",
+		"copied", "appended", "aliased", "pointer", "shadowed-local",
+		"shadowed-parameter", "shadowed-range", "name-outside-call",
+		"acquire-write", "other-identifier", "declared-twice", "declared-var",
+		"declared-untyped", "declared-slice",
 	} {
 		t.Run(name, func(t *testing.T) {
 			problems, err := checkWriteSites(filepath.Join("testdata", "writesite", name))
@@ -274,15 +297,17 @@ func TestSingleStatusWriteCallSiteFailsClosed(t *testing.T) {
 		})
 	}
 
-	t.Run("one-write-passes", func(t *testing.T) {
-		problems, err := checkWriteSites(filepath.Join("testdata", "writesite", "one-write"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, p := range problems {
-			t.Errorf("a copy that keeps the rule was flagged: %s", p)
-		}
-	})
+	for _, name := range []string{"one-write", "one-write-concatenated-name"} {
+		t.Run(name+"-passes", func(t *testing.T) {
+			problems, err := checkWriteSites(filepath.Join("testdata", "writesite", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range problems {
+				t.Errorf("a copy that keeps the rule was flagged: %s", p)
+			}
+		})
+	}
 
 	t.Run("errors", func(t *testing.T) {
 		unparsable := t.TempDir()

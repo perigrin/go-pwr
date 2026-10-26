@@ -3,9 +3,11 @@
 
 package ble
 
-var statusRequest = []byte{0x20}
+const statusRequest byte = 0x20
 
 func send() {
-	object.CallWithContext(ctx, "org.bluez.GattCharacteristic1.WriteValue", 0, statusRequest, options)
+	object.CallWithContext(ctx, "org.bluez.GattCharacteristic1.WriteValue", 0, []byte{statusRequest}, options)
 }
-func other() { object.Call("org.bluez.GattCharacteristic1.WriteValue", 0, statusRequest, options) }
+func other() {
+	object.Call("org.bluez.GattCharacteristic1.WriteValue", 0, []byte{statusRequest}, options)
+}

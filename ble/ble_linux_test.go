@@ -220,3 +220,30 @@ func TestOpenNoAdapter(t *testing.T) {
 		t.Errorf("Open() error = %v, want ErrNoAdapter and ErrFatalAtStartup", err)
 	}
 }
+
+func TestAdapterUnboundAfterOpenIsRetryable(t *testing.T) {
+	requireRoot(t)
+	restoreOnCleanup(t)
+	adapter, err := Open()
+	if err != nil {
+		t.Fatalf("Open() error = %v, want nil", err)
+	}
+	unbindAdapter(t)
+
+	err = adapter.Check()
+	t.Logf("Check() with hci0 unbound = %v", err)
+	if !errors.Is(err, ErrRetryable) || !errors.Is(err, ErrNoAdapter) {
+		t.Errorf("Check() error = %v, want ErrRetryable and ErrNoAdapter", err)
+	}
+	if errors.Is(err, ErrFatalAtStartup) {
+		t.Errorf("Check() error = %v, an adapter lost after Open must not be fatal at startup", err)
+	}
+
+	sh(t, "echo serial0-0 | tee /sys/bus/serial/drivers/hci_uart_bcm/bind")
+	if !waitPowered(t) {
+		t.Fatal("adapter not powered 30s after rebinding hci0")
+	}
+	if err := adapter.Check(); err != nil {
+		t.Errorf("Check() after rebinding hci0 = %v, want nil", err)
+	}
+}

@@ -78,6 +78,12 @@ type Reading struct {
 	// FieldErrors holds one error for each non-gating field that failed
 	// to decode, for stderr.
 	FieldErrors []error
+
+	// Warnings holds one error for each plausibility check the reading
+	// failed, for stderr. A warning never changes or suppresses the
+	// reading. Each is identifiable with errors.Is or errors.As, such as
+	// ErrTempMismatch.
+	Warnings []error
 }
 
 // FieldError reports a non-gating field that failed to decode.
@@ -133,6 +139,9 @@ func Decode(reply string) (Reading, error) {
 			continue
 		}
 		*f.dst = &v
+	}
+	if w := checkTemps(r.TempC, r.TempF); w != nil {
+		r.Warnings = append(r.Warnings, w)
 	}
 	return r, nil
 }

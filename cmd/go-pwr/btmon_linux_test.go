@@ -233,3 +233,76 @@ func requireBtmon(t *testing.T) string {
 	}
 	return mac
 }
+
+// wantNoBadWrites fails the test if the checker found a write that is not
+// allowed. A trace with no connection or no handle map is accepted only when
+// it holds no writes at all, which is what a reading that never got as far as
+// connecting leaves.
+func wantNoBadWrites(t *testing.T, report *btmon.Report, err error) {
+	t.Helper()
+	switch {
+	case err == nil:
+	case (errors.Is(err, btmon.ErrNoConnection) || errors.Is(err, btmon.ErrNoHandleMap)) && len(report.Writes) == 0:
+		t.Logf("the reading ended before it wrote anything: %v", err)
+	default:
+		t.Error(err)
+	}
+}
+
+func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
+	mac := requireBtmon(t)
+
+	// A reading takes at least 2.8 s on lola, so 1 s ends in the scan and 3 s
+	// usually in the connect or the request.
+	t.Run("timeout too short", func(t *testing.T) {
+		report, err := capturedRun(t, mac, func() {
+			for _, timeout := range []string{"1s", "3s"} {
+				runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", timeout)
+			}
+		})
+		wantNoBadWrites(t, report, err)
+	})
+
+	// With the GATT cache just cleared a reading takes about 12 s, so 6 s
+	// lands after the connect and in the discovery or the request.
+	t.Run("SIGINT mid-reading", func(t *testing.T) {
+		report, err := capturedRun(t, mac, func() {
+			interrupt(t, syscall.SIGINT, 6*time.Second, "--mac", mac, "--format", "json")
+		})
+		wantNoBadWrites(t, report, err)
+		if report.Connections < 1 {
+			t.Errorf("no connection to the controller before the signal, so it did not land mid-reading")
+		}
+	})
+
+	t.Run("dropped --follow link", func(t *testing.T) {
+		t.Cleanup(func() { sh(t, "bluetoothctl disconnect "+mac) })
+		report, err := capturedRun(t, mac, func() {
+			r := startGoPwr(t, "--mac", mac, "--follow=5s", "--format", "json")
+			if !r.waitFor(60*time.Second, func() bool { return r.readings() >= 2 }) {
+				t.Fatalf("fewer than 2 readings in 60 s; stderr %q", r.stderr)
+			}
+			before := r.readings()
+			if out := sh(t, "bluetoothctl disconnect "+mac); !strings.Contains(out, "Disconnection successful") {
+				t.Fatalf("bluetoothctl disconnect %s: %s", mac, out)
+			}
+			if !r.waitFor(15*time.Second, func() bool { return r.errorLines() >= 1 }) {
+				t.Fatalf("no error line on stderr 15 s after the drop; running: %v", r.running())
+			}
+			if !r.waitFor(45*time.Second, func() bool { return r.readings() > before }) {
+				t.Fatalf("no reading within 45 s of the drop; stderr:\n%s", r.stderr)
+			}
+			if got := r.stop(syscall.SIGTERM); got.status != 0 {
+				t.Errorf("status %d, want 0", got.status)
+			}
+		})
+		// This one must have connected, dropped and connected again, or it
+		// proves nothing about the link coming back.
+		if err != nil {
+			t.Error(err)
+		}
+		if report.Connections < 2 || report.StatusRequests < 3 {
+			t.Errorf("%d connections and %d status requests, want at least 2 and 3 across the drop", report.Connections, report.StatusRequests)
+		}
+	})
+}

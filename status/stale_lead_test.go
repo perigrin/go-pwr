@@ -94,6 +94,12 @@ func TestAssembleFailureAfterDiscardSaysSo(t *testing.T) {
 	if !strings.Contains(err.Error(), "discarded 20 bytes") {
 		t.Errorf("error %q does not say 20 bytes were discarded", err)
 	}
+	// A space inside the body would restart the reply at it, and then the
+	// discarded bytes are the current reply's, so the error says only where
+	// they were, not whose.
+	if !strings.Contains(err.Error(), "before the reply's last space") || strings.Contains(err.Error(), "earlier reply") {
+		t.Errorf("error %q, want it to say the bytes came before the reply's last space without naming whose they were", err)
+	}
 }
 
 // A stale tail that ends inside a notification shifts the real reply off the

@@ -176,7 +176,7 @@ func wholeBody(body string) bool {
 func (a *Assembler) fail(err error) (string, bool, error) {
 	reply := a.buf.String()
 	if a.discarded > 0 {
-		err = fmt.Errorf("%w (discarded %d bytes of an earlier reply's tail before it)", err, a.discarded)
+		err = fmt.Errorf("%w (discarded %d bytes before the reply's last space)", err, a.discarded)
 	}
 	a.err = &ReplyError{Reply: reply, Err: err}
 	return reply, false, a.err

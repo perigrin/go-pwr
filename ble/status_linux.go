@@ -408,7 +408,7 @@ func (l *statusLink) await(ctx context.Context, closing <-chan struct{}, comp *s
 // no harm; await leaves a debug line for it.
 func (l *statusLink) noteDiscards(err error) error {
 	if n := l.buf.discarded(); n > 0 {
-		return fmt.Errorf("%w (discarded %d bytes of an earlier reply's tail before it)", err, n)
+		return fmt.Errorf("%w (discarded %d bytes before the reply's last space)", err, n)
 	}
 	return err
 }

@@ -6,8 +6,11 @@ package ble
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/godbus/dbus/v5"
 )
 
 // openAttempt returns an attempt like ConnectWithRetry's, with the opening of
@@ -82,5 +85,27 @@ func TestLinkLostReportsFailedClose(t *testing.T) {
 func TestLinkLostNoError(t *testing.T) {
 	if err := linkLost("C3:00:00:58:51:40", nil, func() (bool, error) { return false, nil }, func() error { return nil }); err != nil {
 		t.Errorf("linkLost with no open error = %v, want nil", err)
+	}
+}
+
+// BlueZ saying the device is not connected is proof of the loss, even when
+// the Connected property has not caught up with a link that is going down: on
+// lola, a run killed while it was closing left a link that the next run found
+// up, whose status link then failed with NotConnected.
+func TestLinkLostWhenBlueZSaysNotConnectedBeforeThePropertyFollows(t *testing.T) {
+	notConnected := fmt.Errorf("turn on notifications of /org/bluez/hci0/dev_C3/service000c/char000d: %w",
+		dbus.Error{Name: "org.bluez.Error.NotConnected", Body: []any{"Not Connected"}})
+	attempt, opens, closes := openAttempt([]error{notConnected}, func() (bool, error) { return true, nil })
+	conn, err := retryConnect(context.Background(), time.Millisecond, attempt)
+	if err != nil || conn == nil || *opens != 2 || *closes != 1 {
+		t.Errorf("conn %v, err %v after %d opens and %d closes, want a conn on the second open after one close", conn, err, *opens, *closes)
+	}
+}
+
+func TestOtherBlueZErrorWithTheLinkUpIsNotLost(t *testing.T) {
+	failed := dbus.Error{Name: "org.bluez.Error.Failed"}
+	attempt, opens, closes := openAttempt([]error{failed}, func() (bool, error) { return true, nil })
+	if _, err := retryConnect(context.Background(), time.Millisecond, attempt); err != nil || *opens != 1 || *closes != 0 {
+		t.Errorf("err %v after %d opens and %d closes, want the first conn and no close", err, *opens, *closes)
 	}
 }

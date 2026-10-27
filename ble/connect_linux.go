@@ -204,21 +204,32 @@ func ignoreGone(err error) error {
 	return err
 }
 
+// isNotConnected reports whether err says BlueZ found the device not
+// connected.
+func isNotConnected(err error) bool {
+	return dbusErrorName(err) == "org.bluez.Error.NotConnected"
+}
+
 // linkLost turns an error from opening the status link into the error of a
 // lost link, closed with closeLink, or returns nil if the link is not lost. A
 // link is lost when up says it is down, whichever step of opening gave the
-// error, so every loss is told the same way and not by the name of one error.
-// An error with the link still up, or one with no answer on the link, is not
-// a loss: it is left for the request, which opens the link again and reports
-// it. A lost link is closed first, so the next attempt meets a link that is
+// error, and not only when the error is the one that BlueZ gives for it. That
+// error (isNotConnected) counts too, since the Connected property can lag a
+// link that is going down: on lola, a run killed while it was closing left a
+// link that the next run found up and that failed with NotConnected when its
+// status link was opened. An error with the link still up, or one with no
+// answer on the link, is not a loss: it is left for the request, which opens
+// the link again and reports it. A lost link is closed first, so the next attempt meets a link that is
 // down and makes a new one; the error is retryable, and joined with the
 // close's own error if that failed.
 func linkLost(mac string, openErr error, up func() (bool, error), closeLink func() error) error {
 	if openErr == nil {
 		return nil
 	}
-	if isUp, err := up(); err != nil || isUp {
-		return nil
+	if !isNotConnected(openErr) {
+		if isUp, err := up(); err != nil || isUp {
+			return nil
+		}
 	}
 	err := fmt.Errorf("connect %s: the link was lost while opening it: %w", mac, openErr)
 	if closeErr := closeLink(); closeErr != nil {

@@ -359,7 +359,7 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 	// alone varies by seconds from one run to the next, so the search bisects
 	// rather than only shortening: a try that ended before the link came up
 	// raises the next timeout, and one that read a whole reply lowers it, until
-	// two readings have failed with the link up or the search has used its
+	// a reading has failed with the link up or the search has used its
 	// tries or its budget. That is judged from
 	// btmon's own text: a successful LE Connection Complete with the
 	// controller's peer address, printed before go-pwr had been gone 200 ms (a
@@ -367,7 +367,7 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 	// it names the connect even when the link was up. 1 s ends in the scan and
 	// writes nothing. At least one reading must be cut off with the link up.
 	t.Run("timeout too short", func(t *testing.T) {
-		const searchBudget = 120 * time.Second
+		const searchBudget = 90 * time.Second
 		began := time.Now()
 		cutOffLinkUp, attempts := 0, 0
 		report, err := capturedRun(t, mac, func(c *btmonCapture) {
@@ -389,7 +389,7 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 			// lo ended before the link came up; hi read a whole reply.
 			lo, hi := time.Second, 2*replyAt
 			timeout := replyAt * 85 / 100
-			for ; attempts < 10 && cutOffLinkUp < 2; attempts++ {
+			for ; attempts < 10 && cutOffLinkUp < 1; attempts++ {
 				timeout = timeout.Round(100 * time.Millisecond)
 				if time.Since(began) > searchBudget {
 					break

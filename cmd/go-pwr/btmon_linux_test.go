@@ -67,18 +67,21 @@ func effectiveCaps(t *testing.T) uint64 {
 	return 0
 }
 
-// btmonPrerequisites says what is missing to capture with btmon: the program
-// in a directory of pathEnv, and root or CAP_NET_RAW.
+// btmonPrerequisites says what is missing to capture with btmon: btmon and
+// stdbuf (which keeps btmon's live text from sitting in a pipe buffer) in a
+// directory of pathEnv, and root or CAP_NET_RAW.
 func btmonPrerequisites(pathEnv string, euid int, capEff uint64) error {
-	found := false
-	for _, dir := range filepath.SplitList(pathEnv) {
-		if info, err := os.Stat(filepath.Join(dir, "btmon")); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			found = true
-			break
+	for _, program := range []string{"btmon", "stdbuf"} {
+		found := false
+		for _, dir := range filepath.SplitList(pathEnv) {
+			if info, err := os.Stat(filepath.Join(dir, program)); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+				found = true
+				break
+			}
 		}
-	}
-	if !found {
-		return errors.New("btmon is not installed (BlueZ) or not on PATH")
+		if !found {
+			return fmt.Errorf("%s is not installed (btmon is BlueZ, stdbuf is coreutils) or not on PATH", program)
+		}
 	}
 	if euid != 0 && capEff&capNetRaw == 0 {
 		return errors.New("btmon needs root or CAP_NET_RAW: run the test as `sudo -n env GO_PWR_TEST_MAC=… ./gopwr.test …`")
@@ -120,7 +123,9 @@ type btmonCapture struct {
 func startBtmon(t *testing.T) *btmonCapture {
 	t.Helper()
 	c := &btmonCapture{t: t, file: filepath.Join(t.TempDir(), "capture.btsnoop")}
-	c.cmd = commandInGroup("btmon", "-w", c.file)
+	// stdbuf -oL: btmon prints to a pipe, which glibc block-buffers, so
+	// without it the text the tests wait on arrives in chunks, late.
+	c.cmd = commandInGroup("stdbuf", "-oL", "btmon", "-w", c.file)
 	c.out = &syncBuffer{}
 	c.cmd.Stdout, c.cmd.Stderr = c.out, &syncBuffer{}
 	if err := c.cmd.Start(); err != nil {
@@ -142,28 +147,46 @@ func startBtmon(t *testing.T) *btmonCapture {
 	return nil
 }
 
-// count says how many times marker has appeared in what btmon has printed.
-func (c *btmonCapture) count(marker *regexp.Regexp) int {
-	return len(marker.FindAllStringIndex(c.out.String(), -1))
+// size is how many bytes btmon has printed so far.
+func (c *btmonCapture) size() int {
+	c.out.mu.Lock()
+	defer c.out.mu.Unlock()
+	return c.out.b.Len()
+}
+
+// since is what btmon printed from byte offset off on.
+func (c *btmonCapture) since(off int) string {
+	c.out.mu.Lock()
+	defer c.out.mu.Unlock()
+	b := c.out.b.Bytes()
+	if off > len(b) {
+		off = len(b)
+	}
+	return string(b[off:])
 }
 
 // settle waits until btmon has printed nothing for 2 s, so that the lines of
-// an earlier run are all counted before the next marker is waited for.
+// an earlier run are all behind the offset the next wait starts from. It
+// fails the test if btmon is still printing after 30 s.
 func (c *btmonCapture) settle() {
-	last, quietSince := len(c.out.String()), time.Now()
+	c.t.Helper()
+	last, quietSince, deadline := c.size(), time.Now(), time.Now().Add(30*time.Second)
 	for time.Since(quietSince) < 2*time.Second {
+		if time.Now().After(deadline) {
+			c.t.Fatal("btmon was still printing 30 s after the last run")
+		}
 		time.Sleep(50 * time.Millisecond)
-		if n := len(c.out.String()); n != last {
+		if n := c.size(); n != last {
 			last, quietSince = n, time.Now()
 		}
 	}
 }
 
-// waitForMore waits up to limit for marker to appear more often than it has
-// before, polling fast so that a signal can follow within a few ms.
-func (c *btmonCapture) waitForMore(marker *regexp.Regexp, before int, limit time.Duration) bool {
-	for deadline := time.Now().Add(limit); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-		if c.count(marker) > before {
+// waitFor polls every 25 ms, for up to limit, for marker in what btmon
+// printed after offset from, looking only at that new text.
+func (c *btmonCapture) waitFor(marker *regexp.Regexp, from int, limit time.Duration) bool {
+	for deadline := time.Now().Add(limit); time.Now().Before(deadline); time.Sleep(25 * time.Millisecond) {
+		if marker.MatchString(c.since(from)) {
 			return true
 		}
 	}
@@ -296,18 +319,26 @@ const (
 )
 
 // cancelAfter starts go-pwr, signals it with SIGINT as soon as btmon prints
-// one more of marker, and checks that it exits. The signal can overtake the
-// reply or follow it; either way go-pwr must stop.
-func cancelAfter(t *testing.T, c *btmonCapture, mac string, marker *regexp.Regexp) {
+// marker, and checks that it exits.
+//
+// The signal follows btmon's text, not the radio: btmon must read the packet,
+// decode it and print it on lola's ARMv6, so the signal can reach go-pwr
+// well after the write, even after the reading is done (exit 0). Which side
+// of the next write it falls on is whatever the lag makes it, so each run's
+// exit status and the time from start to signal are logged, and the check is
+// on what the trace holds afterwards.
+func cancelAfter(t *testing.T, c *btmonCapture, mac, what string, marker *regexp.Regexp) {
 	t.Helper()
 	c.settle()
-	before := c.count(marker)
+	from := c.size()
 	r := startGoPwr(t, "--mac", mac, "--format", "json")
-	if !c.waitForMore(marker, before, 60*time.Second) {
-		t.Fatalf("btmon showed no %v within 60 s of starting go-pwr; stderr %q", marker, r.stderr)
+	if !c.waitFor(marker, from, 60*time.Second) {
+		t.Fatalf("btmon showed no %s within 60 s of starting go-pwr; stderr %q", what, r.stderr)
 	}
+	signalledAfter := time.Since(r.began).Round(time.Millisecond)
 	r.cmd.Process.Signal(syscall.SIGINT)
 	got := r.finish(45 * time.Second)
+	t.Logf("SIGINT %v after go-pwr started, on btmon printing the %s: exit status %d", signalledAfter, what, got.status)
 	if got.status > 1 {
 		t.Errorf("status %d after SIGINT, want 0 (the reading was done) or 1", got.status)
 	}
@@ -321,8 +352,11 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 	// scan, which writes nothing; 2 s to 5 s end in the connect, the discovery
 	// or the request, which of them varies from run to run. A run that got as
 	// far as the status request says so in its error, and at least one must.
+	// ("status request:" also prefixes failures to open the link, so this is
+	// "after the connect started", and the trace's second connection is the
+	// check that a connect did happen.)
 	t.Run("timeout too short", func(t *testing.T) {
-		cutOffInRequest := 0
+		cutOffAfterConnect := 0
 		report, err := capturedRun(t, mac, func(*btmonCapture) {
 			t.Log(oneShotWarmup)
 			if r, _ := runGoPwr(t, "--mac", mac, "--format", "json"); r.status != 0 {
@@ -331,13 +365,13 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 			for _, timeout := range []string{"1s", "2s", "2500ms", "3s", "3500ms", "4s", "4500ms", "5s"} {
 				r, _ := runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", timeout)
 				if strings.Contains(r.stderr, "status request:") {
-					cutOffInRequest++
+					cutOffAfterConnect++
 				}
 			}
 		})
 		wantNoBadWrites(t, report, err)
-		if cutOffInRequest == 0 || report.Connections < 2 {
-			t.Errorf("%d readings were cut off in the status request and the trace has %d connections: no timeout landed after the connect, so none proves anything", cutOffInRequest, report.Connections)
+		if cutOffAfterConnect == 0 || report.Connections < 2 {
+			t.Errorf("%d readings were cut off after the connect and the trace has %d connections: no timeout landed after the connect, so none proves anything", cutOffAfterConnect, report.Connections)
 		}
 	})
 
@@ -362,8 +396,8 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 			if r, _ := runGoPwr(t, "--mac", mac, "--format", "json"); r.status != 0 {
 				t.Fatalf("status %d, want 0", r.status)
 			}
-			cancelAfter(t, c, mac, cccdOnMarker)
-			cancelAfter(t, c, mac, statusMarker)
+			cancelAfter(t, c, mac, "CCCD write", cccdOnMarker)
+			cancelAfter(t, c, mac, "status request", statusMarker)
 		})
 		if err != nil {
 			t.Error(err)

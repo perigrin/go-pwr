@@ -413,3 +413,20 @@ func TestBtmonCheckerRejectsUnknownOpcodes(t *testing.T) {
 		})
 	}
 }
+
+func TestBtmonCheckerCountsUnknownOpcodesInWritesSeen(t *testing.T) {
+	// An opcode the checker cannot class might be a write, so on a
+	// connection it does not recognise it counts as one.
+	for _, att := range []string{"      ATT: Unknown (0x92) len 3", "      ATT: Unknown len 3", "      ATT: Write Command (0x52) len 3"} {
+		trace := "< ACL Data TX: Handle 99 flags 0x00 dlen 8                #1 [hci0] 1.000000\n" + att + "\n        Handle: 0x0011\n          Data[1]: 20\n"
+		report, err := Check(strings.NewReader(trace), controller)
+		if !errors.Is(err, ErrNoConnection) || report.WritesSeen != 1 {
+			t.Errorf("%q: Check = %v with %d writes seen, want ErrNoConnection and 1", att, err, report.WritesSeen)
+		}
+	}
+	// A known non-write does not count.
+	trace := "< ACL Data TX: Handle 99 flags 0x00 dlen 8                #1 [hci0] 1.000000\n      ATT: Read Request (0x0a) len 2\n        Handle: 0x0003\n"
+	if report, _ := Check(strings.NewReader(trace), controller); report.WritesSeen != 0 {
+		t.Errorf("a Read Request counted as a write: %d", report.WritesSeen)
+	}
+}

@@ -44,8 +44,9 @@ type Report struct {
 	Map            HandleMap
 	Writes         []Write // every write on those connections
 	StatusRequests int     // writes of 0x20 to FFF2
-	// WritesSeen counts the ATT writes the host sent on any connection,
-	// whether the checker recognises it as the controller's or not. A trace
+	// WritesSeen counts the ATT PDUs the host sent on any connection that are
+	// writes or might be (an opcode the checker cannot class), whether the
+	// checker recognises the connection as the controller's or not. A trace
 	// whose connection the checker cannot find still shows here that
 	// something was written.
 	WritesSeen int
@@ -101,7 +102,7 @@ func Check(trace io.Reader, mac string) (*Report, error) {
 		if !ok {
 			continue
 		}
-		if pdu.tx && isWrite(pdu.opcode) {
+		if pdu.tx && (pdu.unparsed || isWrite(pdu.opcode) || !isKnownNonWrite(pdu.opcode)) {
 			report.WritesSeen++
 		}
 		if !connected[connKey{p.adapter, pdu.conn}] {

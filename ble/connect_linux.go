@@ -219,9 +219,9 @@ func isNotConnected(err error) bool {
 // link that the next run found up and that failed with NotConnected when its
 // status link was opened. An error with the link still up, or one with no
 // answer on the link, is not a loss: it is left for the request, which opens
-// the link again and reports it. A lost link is closed first, so the next attempt meets a link that is
-// down and makes a new one; the error is retryable, and joined with the
-// close's own error if that failed.
+// the link again and reports it. A lost link is closed first, so the next
+// attempt meets a link that is down and makes a new one; the error is
+// retryable, and joined with the close's own error if that failed.
 func linkLost(mac string, openErr error, up func() (bool, error), closeLink func() error) error {
 	if openErr == nil {
 		return nil

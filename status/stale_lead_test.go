@@ -115,3 +115,34 @@ func TestAssembleStaleTailEndingMidNotification(t *testing.T) {
 		t.Errorf("Discarded = %d, want 29", got)
 	}
 }
+
+// A stale head that began a reply, whose later bytes were lost, followed by a
+// real reply: a second space inside the buffer means the first was not this
+// read's reply, so the read restarts at it and counts what it threw away
+// (decision 12: a whole reply is one space, 166 bytes, CRLF). Seen as a
+// 174-byte "whole" reply that only Decode rejected. Each stream is a prefix
+// of one real reply followed by another real reply, cut every 20 bytes, so
+// both are altered data.
+func TestAssembleSecondSpaceRestartsTheReply(t *testing.T) {
+	old := lolaReply(t, 2)
+	for _, tc := range []struct {
+		name string
+		head int // bytes of the stale reply's start that precede the real one
+	}{
+		{"altered-stale-head-5-bytes-inside-first-notification", 5},
+		{"altered-stale-head-20-bytes-ends-at-notification-edge", 20},
+		{"altered-stale-head-45-bytes-spans-notifications", 45},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := old[:tc.head] + lolaReply(t, 1)
+			a := NewAssembler()
+			reply, whole := addAll(t, a, a.Begin(0), 1, splitEvery(stream, 20))
+			if !whole || reply != lolaReply(t, 1) || len(reply) != 169 {
+				t.Errorf("whole=%v len=%d reply=%q, want the real 169-byte reply alone", whole, len(reply), reply)
+			}
+			if got := a.Discarded(); got != tc.head {
+				t.Errorf("Discarded = %d, want %d", got, tc.head)
+			}
+		})
+	}
+}

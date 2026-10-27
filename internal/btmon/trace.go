@@ -15,9 +15,10 @@ import (
 
 // packet is one header line of btmon's output and the indented lines below it.
 type packet struct {
-	line   int // line number of the header
-	header string
-	body   []string
+	line    int    // line number of the header
+	adapter string // the [hciN] in the header, if it has one
+	header  string
+	body    []string
 }
 
 // splitPackets reads btmon's text output: a header starts in column 0, and
@@ -36,7 +37,7 @@ func splitPackets(r io.Reader) ([]packet, error) {
 				last.body = append(last.body, text)
 			}
 		default:
-			packets = append(packets, packet{line: n, header: text})
+			packets = append(packets, packet{line: n, header: text, adapter: adapterRE.FindString(text)})
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -46,7 +47,9 @@ func splitPackets(r io.Reader) ([]packet, error) {
 }
 
 var (
+	adapterRE     = regexp.MustCompile(`\[hci\d+\]`)
 	aclHeader     = regexp.MustCompile(`^([<>]) ACL Data (TX|RX): Handle (\d+) `)
+	attPrefix     = "ATT:"
 	attLine       = regexp.MustCompile(`^ATT: .*\(0x([0-9a-fA-F]{2})\)`)
 	hciHandleLine = regexp.MustCompile(`^Handle: (\d+)`)
 	peerLine      = regexp.MustCompile(`^Peer address: ([0-9A-Fa-f:]{17})`)
@@ -73,6 +76,18 @@ const (
 func isWrite(op byte) bool {
 	switch op {
 	case opWriteRequest, opWriteCommand, opSignedWriteCommand, opPrepareWriteRequest, opExecuteWriteRequest:
+		return true
+	}
+	return false
+}
+
+// isKnownNonWrite reports whether the opcode is an ATT opcode that is
+// certainly not a write: the other requests and responses, notifications,
+// indications and confirmations. An opcode in neither list is not trusted.
+func isKnownNonWrite(op byte) bool {
+	switch {
+	case op >= 0x01 && op <= 0x11, op == 0x13, op == 0x17, op == 0x19,
+		op == 0x1b, op == 0x1d, op == 0x1e, op == 0x20, op == 0x21, op == 0x23:
 		return true
 	}
 	return false
@@ -126,7 +141,9 @@ type attPDU struct {
 	tx     bool
 	conn   uint16
 	opcode byte
-	fields []string // the trimmed lines below the ATT line
+	// unparsed is an ATT line with no opcode in it, which cannot be classed.
+	unparsed bool
+	fields   []string // the trimmed lines below the ATT line
 }
 
 // attPDUOf reads the ATT PDU in an ACL packet, if it holds one.
@@ -137,12 +154,17 @@ func attPDUOf(p packet) (attPDU, bool) {
 	}
 	conn, _ := strconv.ParseUint(h[3], 10, 16)
 	for i, line := range p.body {
-		m := attLine.FindStringSubmatch(strings.TrimSpace(line))
-		if m == nil {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, attPrefix) {
 			continue
 		}
-		op, _ := strconv.ParseUint(m[1], 16, 8)
-		pdu := attPDU{line: p.line, tx: h[2] == "TX", conn: uint16(conn), opcode: byte(op)}
+		pdu := attPDU{line: p.line, tx: h[2] == "TX", conn: uint16(conn)}
+		if m := attLine.FindStringSubmatch(line); m != nil {
+			op, _ := strconv.ParseUint(m[1], 16, 8)
+			pdu.opcode = byte(op)
+		} else {
+			pdu.unparsed = true
+		}
 		for _, f := range p.body[i+1:] {
 			pdu.fields = append(pdu.fields, strings.TrimSpace(f))
 		}

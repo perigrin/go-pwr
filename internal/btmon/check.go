@@ -44,6 +44,11 @@ type Report struct {
 	Map            HandleMap
 	Writes         []Write // every write on those connections
 	StatusRequests int     // writes of 0x20 to FFF2
+	// WritesSeen counts the ATT writes the host sent on any connection,
+	// whether the checker recognises it as the controller's or not. A trace
+	// whose connection the checker cannot find still shows here that
+	// something was written.
+	WritesSeen int
 }
 
 // ErrNoConnection and ErrNoHandleMap are what Check returns for a trace that
@@ -54,45 +59,65 @@ var (
 	ErrNoHandleMap  = errors.New("no handle map from discovery in the trace")
 )
 
+// connKey names a connection: handles are per adapter, so two adapters can
+// each have a connection 64.
+type connKey struct {
+	adapter string
+	handle  uint16
+}
+
 // Check reads btmon's text output (btmon -r on a capture) and reports the
 // writes made on connections to the controller at mac. It returns an error
 // naming every write that go-pwr must never make, and also when the trace
 // holds no connection to the controller or no handle map for it, since a
 // trace that shows nothing proves nothing. Connections to other devices are
-// not counted.
+// not counted in Writes, but every write on any connection is counted in
+// WritesSeen. The report is never nil.
 func Check(trace io.Reader, mac string) (*Report, error) {
+	report := &Report{}
 	packets, err := splitPackets(trace)
 	if err != nil {
-		return nil, err
+		return report, err
 	}
 	mac = strings.ToUpper(mac)
-	report := &Report{}
-	report.Map.otherCCCDs = map[uint16]bool{}
-	connected := map[uint16]bool{} // handles now connected to the controller
+	var disc discovery
+	var problems []error
+	connected := map[connKey]bool{} // connections now open, and whether to the controller
 	var writes []write
 	for _, p := range packets {
 		if ev, ok := connectionEventOf(p); ok {
+			key := connKey{p.adapter, ev.handle}
 			if ev.connected {
-				connected[ev.handle] = ev.address == mac
+				connected[key] = ev.address == mac
 				if ev.address == mac {
 					report.Connections++
 				}
 			} else {
-				delete(connected, ev.handle)
+				delete(connected, key)
 			}
 			continue
 		}
 		pdu, ok := attPDUOf(p)
-		if !ok || !connected[pdu.conn] {
+		if !ok {
+			continue
+		}
+		if pdu.tx && isWrite(pdu.opcode) {
+			report.WritesSeen++
+		}
+		if !connected[connKey{p.adapter, pdu.conn}] {
 			continue
 		}
 		switch {
 		case !pdu.tx && pdu.opcode == opReadByGroupTypeResponse:
-			report.Map.learnServices(pdu.fields)
+			disc.learnServices(pdu.fields)
 		case !pdu.tx && pdu.opcode == opReadByTypeResponse:
-			report.Map.learnCharacteristics(pdu.fields)
+			disc.learnCharacteristics(pdu.fields)
+		case pdu.tx && pdu.unparsed:
+			problems = append(problems, fmt.Errorf("line %d: ATT PDU with no opcode, which go-pwr never sends", pdu.line))
 		case pdu.tx && isWrite(pdu.opcode):
 			writes = append(writes, writeOf(pdu))
+		case pdu.tx && !isKnownNonWrite(pdu.opcode):
+			problems = append(problems, fmt.Errorf("line %d: ATT opcode %#02x is not one the checker knows to be a non-write, so it might be a write", pdu.line, pdu.opcode))
 		}
 	}
 
@@ -102,10 +127,12 @@ func Check(trace io.Reader, mac string) (*Report, error) {
 	if report.Connections == 0 {
 		return report, fmt.Errorf("%w: %s", ErrNoConnection, mac)
 	}
+	var discoveryProblems []error
+	report.Map, discoveryProblems = disc.build()
 	if !report.Map.complete() {
-		return report, fmt.Errorf("%w for %s: discovery named FFF0 at %#04x, FFF1 at %#04x, FFF2 at %#04x", ErrNoHandleMap, mac, report.Map.FFF0Start, report.Map.FFF1Value, report.Map.FFF2Value)
+		return report, errors.Join(append([]error{fmt.Errorf("%w for %s: discovery named FFF0 at %#04x, FFF1 at %#04x with CCCD %#04x, FFF2 at %#04x", ErrNoHandleMap, mac, report.Map.FFF0Start, report.Map.FFF1Value, report.Map.FFF1CCCD, report.Map.FFF2Value)}, discoveryProblems...)...)
 	}
-	var problems []error
+	problems = append(problems, discoveryProblems...)
 	for _, w := range writes {
 		if err := report.Map.judge(w); err != nil {
 			problems = append(problems, fmt.Errorf("line %d: %w", w.line, err))
@@ -116,16 +143,70 @@ func Check(trace io.Reader, mac string) (*Report, error) {
 	return report, errors.Join(problems...)
 }
 
+// service is a primary service from a Read By Group Type Response; uuid is
+// empty for one that is not a 16-bit UUID.
+type service struct {
+	start, end uint16
+	uuid       string
+}
+
+// characteristic is a declaration from a Read By Type Response.
+type characteristic struct {
+	decl, value uint16
+	props       byte
+	uuid        string
+}
+
+// discovery is everything the controller's discovery responses said, kept
+// until the end of the trace so that it can be judged whole.
+type discovery struct {
+	services []service
+	chars    []characteristic
+}
+
 // learnServices reads a Read By Group Type Response: pairs of a handle range
 // and the service's UUID.
-func (m *HandleMap) learnServices(fields []string) {
-	var start, end uint16
+func (d *discovery) learnServices(fields []string) {
+	var cur *service
 	for _, f := range fields {
 		if r := handleRange.FindStringSubmatch(f); r != nil {
-			start, end = hex16(r[1]), hex16(r[2])
+			cur = &service{start: hex16(r[1]), end: hex16(r[2])}
 		}
-		if u := uuid16.FindStringSubmatch(f); u != nil && strings.EqualFold(u[1], "fff0") {
-			m.FFF0Start, m.FFF0End = start, end
+		if strings.HasPrefix(f, "UUID:") && cur != nil {
+			if u := uuid16.FindStringSubmatch(f); u != nil {
+				cur.uuid = strings.ToLower(u[1])
+			}
+			d.services = append(d.services, *cur)
+			cur = nil
+		}
+	}
+}
+
+// learnCharacteristics reads a Read By Type Response for characteristic
+// declarations: each has a properties byte, a value handle and a value UUID.
+func (d *discovery) learnCharacteristics(fields []string) {
+	var cur *characteristic
+	for _, f := range fields {
+		if h := attHandle.FindStringSubmatch(f); h != nil {
+			cur = &characteristic{decl: hex16(h[1])}
+		}
+		if cur == nil {
+			continue
+		}
+		if p := properties.FindStringSubmatch(f); p != nil {
+			cur.props = byte(hex16(p[1]))
+		}
+		if v := valueHandle.FindStringSubmatch(f); v != nil {
+			cur.value = hex16(v[1])
+		}
+		if strings.HasPrefix(f, "Value UUID:") {
+			if u := uuid16.FindStringSubmatch(f); u != nil {
+				cur.uuid = strings.ToLower(u[1])
+			}
+			if cur.value != 0 {
+				d.chars = append(d.chars, *cur)
+			}
+			cur = nil
 		}
 	}
 }
@@ -133,47 +214,123 @@ func (m *HandleMap) learnServices(fields []string) {
 // Characteristic property bits that make a characteristic carry a CCCD.
 const notifyOrIndicate = 0x10 | 0x20
 
-// learnCharacteristics reads a Read By Type Response for characteristic
-// declarations: each has a properties byte, a value handle and a value UUID.
+// build turns the discovery into the handle map, and says where it
+// contradicts itself: a handle or UUID named twice with different meanings,
+// FFF1 or FFF2 outside the FFF0 service, or a CCCD that cannot be told.
+//
 // Find Information named no descriptor on the real controller, so a CCCD is
-// taken to sit on the handle after the value of a notifying or indicating
-// characteristic, which is where BlueZ wrote them.
-func (m *HandleMap) learnCharacteristics(fields []string) {
-	var props byte
-	var value uint16
-	for _, f := range fields {
-		if attHandle.MatchString(f) {
-			props, value = 0, 0
+// inferred, and only when it is the one handle between a notifying or
+// indicating characteristic's value and the next declaration or the end of
+// its service, which is where BlueZ wrote them. Two or more handles there
+// would be a guess.
+func (d *discovery) build() (HandleMap, []error) {
+	m := HandleMap{otherCCCDs: map[uint16]bool{}}
+	var problems []error
+	conflict := func(format string, args ...any) {
+		problems = append(problems, fmt.Errorf("discovery contradicts itself: "+format, args...))
+	}
+
+	services := map[uint16]service{}
+	for _, s := range d.services {
+		if old, ok := services[s.start]; ok && old != s {
+			conflict("service at %#04x is %#04x-%#04x uuid %q and %#04x-%#04x uuid %q", s.start, old.start, old.end, old.uuid, s.start, s.end, s.uuid)
 		}
-		if p := properties.FindStringSubmatch(f); p != nil {
-			props = byte(hex16(p[1]))
-		}
-		if v := valueHandle.FindStringSubmatch(f); v != nil {
-			value = hex16(v[1])
-		}
-		if u := uuid16.FindStringSubmatch(f); u != nil && strings.HasPrefix(f, "Value UUID") && value != 0 {
-			m.learn(strings.ToLower(u[1]), value, props)
+		services[s.start] = s
+		if s.uuid == "fff0" {
+			if m.FFF0Start != 0 && (m.FFF0Start != s.start || m.FFF0End != s.end) {
+				conflict("FFF0 is %#04x-%#04x and %#04x-%#04x", m.FFF0Start, m.FFF0End, s.start, s.end)
+			}
+			m.FFF0Start, m.FFF0End = s.start, s.end
 		}
 	}
+
+	chars := map[uint16]characteristic{}
+	byValue := map[uint16]characteristic{}
+	for _, c := range d.chars {
+		if old, ok := chars[c.decl]; ok && old != c {
+			conflict("declaration %#04x names value %#04x uuid %q and value %#04x uuid %q", c.decl, old.value, old.uuid, c.value, c.uuid)
+		}
+		if old, ok := byValue[c.value]; ok && old.uuid != c.uuid {
+			conflict("value handle %#04x is uuid %q and uuid %q", c.value, old.uuid, c.uuid)
+		}
+		chars[c.decl] = c
+		byValue[c.value] = c
+	}
+
+	inFFF0 := func(c characteristic) bool {
+		return m.FFF0Start != 0 && c.decl >= m.FFF0Start && c.value <= m.FFF0End
+	}
+	for _, c := range chars {
+		switch c.uuid {
+		case "fff1", "fff2":
+			if !inFFF0(c) {
+				conflict("%s at %#04x is not inside the FFF0 service %#04x-%#04x", strings.ToUpper(c.uuid), c.value, m.FFF0Start, m.FFF0End)
+				continue
+			}
+			target := &m.FFF1Value
+			if c.uuid == "fff2" {
+				target = &m.FFF2Value
+			}
+			if *target != 0 && *target != c.value {
+				conflict("%s is at %#04x and at %#04x", strings.ToUpper(c.uuid), *target, c.value)
+			}
+			*target = c.value
+		case "ffe1":
+			if !slices.Contains(m.FFE1Values, c.value) {
+				m.FFE1Values = append(m.FFE1Values, c.value)
+			}
+		case "2b29":
+			m.ClientFeatures = c.value
+		}
+	}
+
+	for _, c := range chars {
+		if c.props&notifyOrIndicate == 0 {
+			continue
+		}
+		cccd, ok := d.soleHandleAfter(c, chars)
+		if !ok {
+			problems = append(problems, fmt.Errorf("cannot tell the CCCD of the %q characteristic with value %#04x: it is not the one handle before the next declaration or the end of its service", c.uuid, c.value))
+			continue
+		}
+		if c.uuid == "fff1" && c.value == m.FFF1Value {
+			m.FFF1CCCD = cccd
+		} else {
+			m.otherCCCDs[cccd] = true
+		}
+	}
+	slices.Sort(m.FFE1Values)
+	return m, problems
 }
 
-// learn records a characteristic by its 16-bit UUID, value handle and properties.
-func (m *HandleMap) learn(uuid string, value uint16, props byte) {
-	switch uuid {
-	case "fff1":
-		m.FFF1Value = value
-		m.FFF1CCCD = value + 1
-	case "fff2":
-		m.FFF2Value = value
-	case "ffe1":
-		m.FFE1Values = append(m.FFE1Values, value)
-	case "2b29":
-		m.ClientFeatures = value
-	default:
-		if props&notifyOrIndicate != 0 {
-			m.otherCCCDs[value+1] = true
+// soleHandleAfter says the handle after the characteristic's value, if it is
+// the only one before the next declaration or the end of the service that
+// holds the characteristic.
+func (d *discovery) soleHandleAfter(c characteristic, chars map[uint16]characteristic) (uint16, bool) {
+	bound := 0x10000 // exclusive
+	for decl := range chars {
+		if decl > c.value && int(decl) < bound {
+			bound = int(decl)
 		}
 	}
+	holder := false
+	for _, s := range d.services {
+		if s.start <= c.decl && c.decl <= s.end {
+			holder = true
+			if int(s.end)+1 < bound {
+				bound = int(s.end) + 1
+			}
+		}
+	}
+	if !holder || bound != int(c.value)+2 {
+		return 0, false
+	}
+	return c.value + 1, true
+}
+
+func hex16(s string) uint16 {
+	n, _ := strconv.ParseUint(s, 16, 16)
+	return uint16(n)
 }
 
 // judge says why a write is not one go-pwr may make, or nil if it is: 0x20
@@ -229,9 +386,4 @@ func opcodeName(op byte) string {
 		return "Execute Write Request (0x18)"
 	}
 	return fmt.Sprintf("ATT opcode %#02x", op)
-}
-
-func hex16(s string) uint16 {
-	n, _ := strconv.ParseUint(s, 16, 16)
-	return uint16(n)
 }

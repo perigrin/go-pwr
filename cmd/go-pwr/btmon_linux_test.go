@@ -355,9 +355,12 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 	//
 	// The first reading after `bluetoothctl remove` is cold (about 12 s, with
 	// discovery) and later ones are warm (3 to 7 s), so a second reading is the
-	// calibration: its time to the reply is the start of the search, at 85% of
-	// it, each try 15% shorter than the last, until two readings have failed
-	// with the link up or the search has used its budget. That is judged from
+	// calibration: the search starts at 85% of its time to the reply. The scan
+	// alone varies by seconds from one run to the next, so the search bisects
+	// rather than only shortening: a try that ended before the link came up
+	// raises the next timeout, and one that read a whole reply lowers it, until
+	// two readings have failed with the link up or the search has used its
+	// tries or its budget. That is judged from
 	// btmon's own text: a successful LE Connection Complete with the
 	// controller's peer address, printed before go-pwr had been gone 200 ms (a
 	// connect finishing after that is not this run's). The error cannot tell:
@@ -383,10 +386,12 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 			}
 
 			runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", "1s")
-			budget := float64(replyAt) * 0.85
-			for ; attempts < 8 && cutOffLinkUp < 2; attempts, budget = attempts+1, budget*0.85 {
-				timeout := (time.Duration(budget) / (100 * time.Millisecond)) * (100 * time.Millisecond)
-				if timeout < 2*time.Second || time.Since(began) > searchBudget {
+			// lo ended before the link came up; hi read a whole reply.
+			lo, hi := time.Second, 2*replyAt
+			timeout := replyAt * 85 / 100
+			for ; attempts < 10 && cutOffLinkUp < 2; attempts++ {
+				timeout = timeout.Round(100 * time.Millisecond)
+				if time.Since(began) > searchBudget {
 					break
 				}
 				c.settle()
@@ -395,8 +400,23 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 				time.Sleep(200 * time.Millisecond)
 				limit := c.size() - from
 				c.settle()
-				if r.status == 1 && linkUpBefore(c.since(from), mac, limit) {
+				linkUp := linkUpBefore(c.since(from), mac, limit)
+				switch {
+				case r.status == 1 && linkUp:
 					cutOffLinkUp++
+				case r.status == 1:
+					lo = timeout
+				default:
+					hi = timeout
+				}
+				// After a hit, stay near it; otherwise move to the middle of
+				// what is left, nudged when the middle rounds onto this try.
+				if r.status != 1 || !linkUp {
+					next := (lo + hi) / 2
+					if next.Round(100*time.Millisecond) == timeout {
+						next += 100 * time.Millisecond
+					}
+					timeout = next
 				}
 			}
 		})

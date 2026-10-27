@@ -271,6 +271,14 @@ Every write in the trace, by handle:
 - BlueZ also **reads** Server Supported Features (`0x2B3A`) on each connection. That is a read, not a write.
 - BlueZ did **not** write Client Supported Features (`0x2B29`). The controller's GATT service has no such characteristic.
 
+### Link after SIGKILL
+
+Measured on 2026-10-27 on lola with `TestSIGKILLThenNextRunReads` and one longer script run (same controller, BlueZ 5.82). Confidence: **observed**, two runs on one night.
+
+**The link outlives a SIGKILL of go-pwr, and for a long time.** After `go-pwr --follow=5s` was killed with SIGKILL, `Device1.Connected` stayed `true` for the whole 30 s the test logs, and for the whole 600 s a second run watched (it checked every 5 s, and stopped at 600 s with the link still up). BlueZ does not drop a link because the D-Bus client that made it died, and the controller does not drop it while it is idle, so the link stays until someone disconnects it (`bluetoothctl disconnect`, or the next go-pwr run's `Close`). The upper bound is unknown.
+
+The next one-shot run after a SIGKILL read successfully over that link (exit 0, one reading, empty stderr) and disconnected it. See the tests in `cmd/go-pwr/sigkill_linux_test.go` for the other cases.
+
 ## Other writes: do not send
 
 `FFF2` is the input to a serial bridge. The app's other commands are ASCII strings sent **one character per write**, so the controller is parsing a character stream. That makes any stray byte on `FFF2` potentially part of a command. A monitoring client should write only the single byte `0x20`.

@@ -347,25 +347,41 @@ func cancelAfter(t *testing.T, c *btmonCapture, mac, what string, marker *regexp
 func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 	mac := requireBtmon(t)
 
-	// After a full reading, so the trace holds discovery, a --timeout that
-	// ends the reading after the connect. Measured on lola: 1 s ends in the
-	// scan, which writes nothing; 3 s to 5 s end in the connect, the discovery
-	// or the request, which of them varies from run to run. A run that got as
-	// far as the status request says so in its error, and at least one must.
-	// ("status request:" also prefixes failures to open the link, so this is
-	// "after the connect started", and the trace's second connection is the
-	// check that a connect did happen.)
+	// A --timeout budgets the scan, the connect and the reply, and the link is
+	// closed after the reply, outside the budget (decision 0001, "--timeout";
+	// closeBound in ble/ble.go): a reading that printed 4 s in can exit 8 s
+	// in. So whether a given timeout ends the reading before or after the
+	// connect varies from run to run, and the test searches for it. A warm
+	// reading, which also puts discovery in the trace, gives the time to its
+	// reply; timeouts from 95% of that down to 45% in steps are tried, at most
+	// six, until two readings are cut off after the connect, which their
+	// error says by naming the status request ("status request:" also
+	// prefixes a failure to open the link, so the trace's second connection
+	// is the check that a connect really happened). 1 s ends in the scan and
+	// writes nothing. At least one reading must be cut off after the connect.
 	t.Run("timeout too short", func(t *testing.T) {
 		cutOffAfterConnect := 0
 		report, err := capturedRun(t, mac, func(*btmonCapture) {
 			t.Log(oneShotWarmup)
-			if r, _ := runGoPwr(t, "--mac", mac, "--format", "json"); r.status != 0 {
-				t.Fatalf("status %d, want 0", r.status)
+			warm := startGoPwr(t, "--mac", mac, "--format", "json")
+			if !warm.waitFor(60*time.Second, func() bool { return warm.readings() >= 1 }) {
+				t.Fatalf("no warm-up reading in 60 s; stderr %q", warm.stderr)
 			}
-			for _, timeout := range []string{"1s", "3s", "4s", "5s"} {
-				r, _ := runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", timeout)
-				if strings.Contains(r.stderr, "status request:") {
+			replyAt := time.Since(warm.began)
+			if got := warm.finish(45 * time.Second); got.status != 0 {
+				t.Fatalf("warm-up status %d, want 0", got.status)
+			}
+			t.Logf("the warm-up reading printed %v after go-pwr started", replyAt.Round(10*time.Millisecond))
+
+			runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", "1s")
+			for _, fraction := range []float64{0.95, 0.85, 0.75, 0.65, 0.55, 0.45} {
+				timeout := (time.Duration(float64(replyAt)*fraction) / (100 * time.Millisecond)) * (100 * time.Millisecond)
+				r, _ := runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", timeout.String())
+				if r.status == 1 && strings.Contains(r.stderr, "status request:") {
 					cutOffAfterConnect++
+				}
+				if cutOffAfterConnect >= 2 {
+					break
 				}
 			}
 		})

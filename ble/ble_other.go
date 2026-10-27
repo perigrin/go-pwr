@@ -68,3 +68,8 @@ func (f *Follower) Read(ctx context.Context) (string, error) {
 func (f *Follower) Close() error {
 	return ErrUnsupportedPlatform
 }
+
+// ready is the Conn itself here, where nothing else is opened.
+func (c *Conn) ready(ctx context.Context, mac string) (*Conn, error) {
+	return c, nil
+}

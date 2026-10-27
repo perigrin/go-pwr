@@ -19,12 +19,20 @@ const connectAttempts = 3
 // connectPause is the wait between connect attempts.
 const connectPause = time.Second
 
-// ConnectWithRetry opens the link to the controller as Connect does, trying
+// ConnectWithRetry opens the link to the controller as Connect does, and on
+// Linux opens the status link too, so a link left up by a killed run that
+// goes down under it is connected again like any failed attempt. It tries
 // again after a failed attempt while ctx lasts, up to three attempts. A
 // controller BlueZ doesn't know (ErrNotFound) won't appear by trying again,
 // and neither will anything once ctx is done.
 func (a *Adapter) ConnectWithRetry(ctx context.Context, mac string) (*Conn, error) {
-	return retryConnect(ctx, connectPause, func() (*Conn, error) { return a.Connect(ctx, mac) })
+	return retryConnect(ctx, connectPause, func() (*Conn, error) {
+		conn, err := a.Connect(ctx, mac)
+		if err != nil {
+			return nil, err
+		}
+		return conn.ready(ctx, mac)
+	})
 }
 
 // retryConnect calls attempt until it succeeds, attempts run out, ctx is done

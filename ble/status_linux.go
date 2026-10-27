@@ -83,6 +83,28 @@ func (c *Conn) RequestStatus(ctx context.Context) (string, error) {
 	return reply, nil
 }
 
+// openStatusLink opens the status link of c if it has none, as the first
+// RequestStatus would, without writing anything. A link that fails to open
+// is left closed.
+func (c *Conn) openStatusLink(ctx context.Context) error {
+	c.requests.Lock()
+	defer c.requests.Unlock()
+	select {
+	case <-c.closing:
+		return fmt.Errorf("status link: %w: the connection is closed", ErrNotConnected)
+	default:
+	}
+	if c.link != nil {
+		return nil
+	}
+	link, err := c.openLink(ctx)
+	if err != nil {
+		return err
+	}
+	c.link = link
+	return nil
+}
+
 // statusLink is what a Conn needs to read status: a D-Bus connection of its
 // own, the characteristics found on it, and the buffer of the current read.
 //

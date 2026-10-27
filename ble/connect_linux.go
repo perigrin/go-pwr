@@ -201,3 +201,28 @@ func ignoreGone(err error) error {
 	}
 	return err
 }
+
+// isLinkLost reports whether err says BlueZ found the device not connected,
+// as it does when a link found up goes down while the status link is being
+// opened.
+func isLinkLost(err error) bool {
+	return dbusErrorName(err) == "org.bluez.Error.NotConnected"
+}
+
+// ready opens the status link of a Conn that Connect returned, so a link
+// that an earlier run left behind and that is going down is found here, where
+// ConnectWithRetry can connect again, and not in the request. Only the loss
+// of the link is reported from here: any other error from opening the status
+// link is left for RequestStatus, which opens it again and reports it as it
+// always has. A lost link is closed first, so the next attempt meets a link
+// that is down and makes a new one.
+func (c *Conn) ready(ctx context.Context, mac string) (*Conn, error) {
+	if err := c.openStatusLink(ctx); isLinkLost(err) {
+		err = fmt.Errorf("connect %s: the link was lost while opening it: %w", mac, err)
+		if closeErr := c.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close the lost link: %w", closeErr))
+		}
+		return nil, retryableError(err)
+	}
+	return c, nil
+}

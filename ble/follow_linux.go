@@ -68,16 +68,24 @@ func (f *Follower) Read(ctx context.Context) (string, error) {
 		return "", f.dropped()
 	}
 
+	// The watch gets the connection of this reading, and is stopped on every
+	// way out, a panic in the request included: it must not read f.conn,
+	// which the caller may clear after recovering from the panic.
+	conn := f.conn
 	watched, cancel := context.WithCancelCause(ctx)
 	watching := make(chan struct{})
 	go func() {
 		defer close(watching)
-		f.watch(watched, cancel)
+		f.watch(watched, cancel, conn)
 	}()
-	reply, err := f.conn.RequestStatus(watched)
+	stopWatch := func() {
+		cancel(nil)
+		<-watching
+	}
+	defer stopWatch()
+	reply, err := conn.RequestStatus(watched)
 	down := context.Cause(watched) == errLinkDown
-	cancel(nil)
-	<-watching
+	stopWatch()
 	if err == nil {
 		return reply, nil
 	}
@@ -87,12 +95,13 @@ func (f *Follower) Read(ctx context.Context) (string, error) {
 	return "", f.abandoned(err)
 }
 
-// establish scans for the controller and connects to it.
+// establish scans for the controller and connects to it, trying again after
+// a connect that fails (see ConnectWithRetry).
 func (f *Follower) establish(ctx context.Context) (*Conn, error) {
 	if _, err := f.adapter.Scan(ctx, f.mac); err != nil {
 		return nil, err
 	}
-	conn, err := f.adapter.Connect(ctx, f.mac)
+	conn, err := f.adapter.ConnectWithRetry(ctx, f.mac)
 	if err != nil {
 		return nil, err
 	}
@@ -103,14 +112,14 @@ func (f *Follower) establish(ctx context.Context) (*Conn, error) {
 }
 
 // watch ends the reading with errLinkDown as soon as the link is seen down.
-func (f *Follower) watch(ctx context.Context, cancel context.CancelCauseFunc) {
+func (f *Follower) watch(ctx context.Context, cancel context.CancelCauseFunc, conn *Conn) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(pollInterval):
 		}
-		if up, err := connected(ctx, f.conn.object); !up && (err == nil || isGone(err)) {
+		if up, err := connected(ctx, conn.object); !up && (err == nil || isGone(err)) {
 			cancel(errLinkDown)
 			return
 		}

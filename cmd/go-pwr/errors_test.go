@@ -66,18 +66,6 @@ func TestReceiveQuotesTheReplyWhenUptimeFails(t *testing.T) {
 	}
 }
 
-func TestWaitToRetryReportsTheInterruption(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err := waitToRetry(ctx, time.Hour)
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("waitToRetry on a cancelled context = %v, want context.Canceled", err)
-	}
-	if err := waitToRetry(context.Background(), time.Millisecond); err != nil {
-		t.Errorf("waitToRetry = %v, want nil after the pause", err)
-	}
-}
-
 func TestFailedSaysNothingWhenASignalEndedTheReading(t *testing.T) {
 	signalled, stop := context.WithCancel(context.Background())
 	stop() // what SIGINT and SIGTERM do

@@ -19,28 +19,19 @@ import (
 	"github.com/perigrin/go-pwr/status"
 )
 
-// connectAttempts is how many times one reading tries to connect. About 7% of
-// connects on lola are aborted by the local controller, most often right
-// after a link dropped, and BlueZ then accepts the next try. The attempts
-// share the reading's --timeout.
-const connectAttempts = 3
-
-// connectPause is the wait between connect attempts.
-const connectPause = time.Second
-
 // run reads the controller and returns the exit status. A one-shot returns 0
 // only if a reading was printed, 1 otherwise. --poll reads until SIGINT or
-// SIGTERM, and returns 0 then, or 1 if it can't start. SIGINT and SIGTERM end
+// SIGTERM, and returns 0 then, or 1 if it can't start; --follow does the same
+// over one held connection. SIGINT and SIGTERM end
 // a reading in progress, and the link is closed on the way out.
 func run(cfg config, stdout, stderr io.Writer) int {
-	if cfg.follow > 0 {
-		fmt.Fprintln(stderr, "go-pwr: --follow is not implemented")
-		return 1
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if cfg.poll > 0 {
 		return pollMode(ctx, cfg, stdout, stderr)
+	}
+	if cfg.follow > 0 {
+		return followMode(ctx, cfg, stdout, stderr)
 	}
 	return oneShot(ctx, cfg, stdout, stderr)
 }
@@ -96,7 +87,7 @@ func readOnce(ctx context.Context, cfg config, adapter *ble.Adapter, out recordW
 		failed(ctx, stderr, err)
 		return false
 	}
-	conn, err := connect(ctx, adapter, controller.Address)
+	conn, err := adapter.ConnectWithRetry(ctx, controller.Address)
 	if err != nil {
 		failed(ctx, stderr, err)
 		return false
@@ -125,37 +116,6 @@ func receive(reply, device, bootID string, uptime func() (float64, error)) (rece
 		return rx, &status.ReplyError{Reply: reply, Err: err}
 	}
 	return rx, nil
-}
-
-// connect opens the link to the controller, trying again after a failed
-// attempt while the reading's budget lasts. A controller BlueZ doesn't know
-// won't appear by trying again, and neither will anything once ctx is done.
-func connect(ctx context.Context, adapter *ble.Adapter, address string) (*ble.Conn, error) {
-	var err error
-	for attempt := 1; ; attempt++ {
-		var conn *ble.Conn
-		if conn, err = adapter.Connect(ctx, address); err == nil {
-			return conn, nil
-		}
-		if attempt == connectAttempts || ctx.Err() != nil || errors.Is(err, ble.ErrNotFound) {
-			return nil, err
-		}
-		if err := waitToRetry(ctx, connectPause); err != nil {
-			return nil, err
-		}
-	}
-}
-
-// waitToRetry pauses between connect attempts. When ctx ends in the pause,
-// the error says the reading was interrupted, which is what the person needs
-// to know, not the attempt that failed before it.
-func waitToRetry(ctx context.Context, pause time.Duration) error {
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("connect: interrupted while waiting to try again: %w", ctx.Err())
-	case <-time.After(pause):
-		return nil
-	}
 }
 
 // closeConn closes the link on every way out of a reading. A failure, or a

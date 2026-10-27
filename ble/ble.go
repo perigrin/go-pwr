@@ -113,7 +113,9 @@
 //
 // A Follower, from Adapter.Follow, holds one connection across readings, for
 // --follow, where Connect and Close serve one reading. Its Read connects when
-// it has no link, and otherwise reads on the held one.
+// it has no link, and otherwise reads on the held one. It connects with
+// ConnectWithRetry, as a reading of --poll does, since the local controller
+// aborts some connects, most often right after a drop.
 //
 // A Follower prevents a splice by reconnecting after any failed or cut-off
 // reading: a tail of an earlier reply can exist only on a held connection, so

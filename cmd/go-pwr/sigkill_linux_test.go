@@ -5,6 +5,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -20,6 +22,25 @@ func sigkill(t *testing.T, r *liveRun) {
 	if got := r.stop(syscall.SIGKILL); got.status != -1 {
 		t.Fatalf("status %d after SIGKILL, want -1 (killed by a signal)", got.status)
 	}
+}
+
+// sigkillIfRunning kills go-pwr outright as sigkill does, unless it has
+// already exited, and says whether it killed a running process. A process
+// that exited by itself before the signal is not a failure of the test, only
+// a kill that did not happen.
+func sigkillIfRunning(t *testing.T, r *liveRun) bool {
+	t.Helper()
+	err := r.cmd.Process.Signal(syscall.SIGKILL)
+	if errors.Is(err, os.ErrProcessDone) {
+		return false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.finish(45 * time.Second); got.status != -1 {
+		t.Fatalf("status %d after SIGKILL, want -1 (killed by a signal)", got.status)
+	}
+	return true
 }
 
 // watchLink logs whether the link to the controller is up once a second for
@@ -52,10 +73,22 @@ func nextRun(t *testing.T, mac string, args ...string) *liveRun {
 	return startGoPwr(t, append([]string{"--mac", mac, "--format", "json"}, args...)...)
 }
 
-// leaveLinkDown disconnects the controller, whatever a killed run left up.
+// leaveLinkDown disconnects the controller when the test ends, whatever a
+// killed run left up, and fails the test if the link is not down after that.
 func leaveLinkDown(t *testing.T, mac string) {
 	t.Helper()
-	t.Cleanup(func() { sh(t, "bluetoothctl disconnect "+mac) })
+	t.Cleanup(func() {
+		sh(t, "bluetoothctl disconnect "+mac)
+		requireLinkDown(t, mac)
+	})
+}
+
+// resetLink disconnects the controller and requires the link to be down, so
+// a test or subtest starts with no link left by the one before it.
+func resetLink(t *testing.T, mac string) {
+	t.Helper()
+	sh(t, "bluetoothctl disconnect "+mac)
+	requireLinkDown(t, mac)
 }
 
 // readsOnce runs a one-shot JSON reading and checks that it succeeds with
@@ -151,10 +184,17 @@ func TestSIGKILLMidReplyThenPollReads(t *testing.T) {
 	// these offsets from the link coming up land before, in and after the
 	// reply. Which of them is "in" can't be seen from outside, so each kills
 	// a one-shot run and each must leave the next run able to read.
+	// A one-shot run may already have exited by the later offsets, which is
+	// logged and skips that kill; at least one offset must kill a running one.
+	killedRunning := 0
+	defer func() {
+		if killedRunning == 0 {
+			t.Error("no offset killed a running process, so nothing here tested a SIGKILL")
+		}
+	}()
 	for _, offset := range []time.Duration{600 * time.Millisecond, 900 * time.Millisecond, 1200 * time.Millisecond} {
 		t.Run(offset.String(), func(t *testing.T) {
-			sh(t, "bluetoothctl disconnect "+mac)
-			requireLinkDown(t, mac)
+			resetLink(t, mac)
 			up := linkUpSignal(t, mac)
 			killed := startGoPwr(t, "--mac", mac, "--format", "json")
 			select {
@@ -163,8 +203,12 @@ func TestSIGKILLMidReplyThenPollReads(t *testing.T) {
 				t.Fatalf("the link did not come up in 30 s; stderr %q", killed.stderr)
 			}
 			time.Sleep(offset)
-			sigkill(t, killed)
-			t.Logf("killed %v after the link came up; the killed run had printed %d readings", offset, killed.readings())
+			if sigkillIfRunning(t, killed) {
+				killedRunning++
+				t.Logf("killed %v after the link came up; the killed run had printed %d readings", offset, killed.readings())
+			} else {
+				t.Logf("the one-shot run had already exited %v after the link came up: kill skipped at this offset", offset)
+			}
 
 			r := nextRun(t, mac, "--poll=5s")
 			if !r.waitFor(60*time.Second, func() bool { return r.readings() >= 1 }) {
@@ -243,6 +287,7 @@ func TestSIGKILLNextReadingUnspliced(t *testing.T) {
 	// the kill in or just before one (see TestFollowSignalDuringHeldReading).
 	for _, offset := range []time.Duration{700 * time.Millisecond, 850 * time.Millisecond, time.Second} {
 		t.Run(offset.String(), func(t *testing.T) {
+			resetLink(t, mac)
 			killed := startGoPwr(t, "--mac", mac, "--follow=1s", "--format", "json")
 			if !killed.waitFor(45*time.Second, func() bool { return killed.readings() >= 3 }) {
 				t.Fatalf("fewer than 3 readings in 45 s; stderr %q", killed.stderr)

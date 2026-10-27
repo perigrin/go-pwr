@@ -1,0 +1,36 @@
+# ABOUTME: systemd unit that runs go-pwr as lola's one owner process, polling the
+# ABOUTME: controller and appending JSON readings to /var/log/go-pwr/readings.jsonl.
+#
+# Install on lola:
+#   sudo install -m 0755 go-pwr /usr/local/bin/go-pwr
+#   sudo install -m 0644 deploy/go-pwr.service /etc/systemd/system/go-pwr.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now go-pwr
+#
+# Stop it before any hardware test (`sudo systemctl stop go-pwr`): the tests need
+# the controller to themselves, and a second go-pwr would contend for it.
+
+[Unit]
+Description=go-pwr: poll the Go Power solar controller over Bluetooth LE
+Wants=bluetooth.service
+After=bluetooth.service
+# A missing adapter at boot fails startup in under a second; with systemd's
+# default start limit, Restart=always would give up after five quick failures.
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/local/bin/go-pwr --poll --format json --mac C3:00:00:58:51:40
+# Readings only on stdout, appended to the log; errors and warnings go to the journal.
+StandardOutput=append:/var/log/go-pwr/readings.jsonl
+StandardError=journal
+Restart=always
+RestartSec=5
+# BlueZ's D-Bus policy lets any user talk to org.bluez, so no privilege is needed.
+DynamicUser=yes
+LogsDirectory=go-pwr
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

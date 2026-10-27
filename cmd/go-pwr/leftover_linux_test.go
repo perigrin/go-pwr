@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -176,6 +177,20 @@ func TestLeftoverLinkFromKilledRunIsDropped(t *testing.T) {
 	if len(events) < len(want) || strings.Join(events[:3], " ") != strings.Join(want, " ") {
 		t.Errorf("events %v, want them to begin %v", events, want)
 	}
+	replies := 0
+	for _, e := range events {
+		if e == "reply" {
+			replies++
+		}
+	}
+	t.Logf("%d notifications of the reply between the run's link coming up and going down", replies)
+	var got struct {
+		Raw string `json:"raw"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &got); err != nil {
+		t.Fatalf("stdout %q: %v", r.stdout, err)
+	}
+	wantFramedWhole(t, got.Raw)
 	readings := parseReadings(t, r.stdout)
 	if len(readings) != 1 || readings[0].at.Before(began.Truncate(time.Second)) {
 		t.Errorf("readings %+v, want one made at or after the second the run began (%v)", readings, began)

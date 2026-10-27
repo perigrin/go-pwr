@@ -191,6 +191,10 @@ func TestLeftoverLinkFromKilledRunIsDropped(t *testing.T) {
 		t.Fatalf("stdout %q: %v", r.stdout, err)
 	}
 	wantFramedWhole(t, got.Raw)
+	// This check cannot tell a stale reply from a fresh one: go-pwr stamps
+	// the time it received a reply, not the time the controller made it. The
+	// evidence is the order of events above, and (in the btmon test)
+	// FirstRequestOnNewLink.
 	readings := parseReadings(t, r.stdout)
 	if len(readings) != 1 || readings[0].at.Before(began.Truncate(time.Second)) {
 		t.Errorf("readings %+v, want one made at or after the second the run began (%v)", readings, began)

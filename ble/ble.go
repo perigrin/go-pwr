@@ -88,9 +88,14 @@
 // connects through, first asks BlueZ to disconnect the controller if its link
 // is up, waits until the Connected property is false (within ctx, so inside
 // the reading's --timeout) and then connects afresh. If the link will not go
-// down, or comes back, because another client such as the phone app holds it,
-// the reading fails with an error that matches ErrRetryable. Connect alone
-// reuses a link that is up and is left to callers that want that. A Follower
+// down within the time, because BlueZ refuses to drop it or another client
+// holds it, the reading fails with an error that matches ErrRetryable. A link
+// that another client makes again between the drop and the connect is not
+// noticed, and Connect reuses it (see docs/reference/protocol.md, "Link after
+// SIGKILL"). Connect alone reuses a link that is up and is left to callers
+// that want that. A second go-pwr on the same machine therefore disconnects
+// the owner's link mid-reading rather than sharing it: decision 0001's
+// one-owner rule applies. A Follower
 // keeps the link it made itself across readings, and drops only a link that
 // was up before its first connect, or one it did not make after a failed
 // reading.

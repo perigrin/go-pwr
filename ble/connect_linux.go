@@ -105,10 +105,11 @@ func (a *Adapter) Connect(ctx context.Context, mac string) (*Conn, error) {
 // reading connects afresh.
 //
 // The wait is bounded by ctx. A link that does not go down, because BlueZ
-// refuses or another client, such as the phone app, holds it or makes it
-// again, is an error that matches ErrRetryable: the reading fails rather than
-// read over a link it did not make. A device BlueZ has no object for is not
-// an error here; Connect reports it.
+// refuses or the time runs out, is an error that matches ErrRetryable: the
+// reading fails rather than read over a link it did not make. A link that
+// another client makes again after the drop is not noticed: Connect finds it
+// up and reuses it, a window that protocol.md records. A device BlueZ has no
+// object for is not an error here; Connect reports it.
 func (a *Adapter) dropLeftover(ctx context.Context, mac string) error {
 	object := a.conn.Object("org.bluez", devicePath(a, mac))
 	up, err := connected(ctx, object)
@@ -121,26 +122,10 @@ func (a *Adapter) dropLeftover(ctx context.Context, mac string) error {
 	if !up {
 		return nil
 	}
-	if err := object.CallWithContext(ctx, deviceInterface+".Disconnect", 0).Err; err != nil && !isGone(err) {
+	if err := disconnectWithin(ctx, object); err != nil {
 		return retryableError(describe("drop the link left up to "+mac, err))
 	}
-	for {
-		up, err := connected(ctx, object)
-		if isGone(err) {
-			return nil
-		}
-		if err != nil {
-			return retryableError(describe("drop the link left up to "+mac, err))
-		}
-		if !up {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return retryableError(fmt.Errorf("drop the link left up to %s: still up when the time ran out: %w", mac, ctx.Err()))
-		case <-time.After(pollInterval):
-		}
-	}
+	return nil
 }
 
 // connect connects unless the link is already up.
@@ -216,6 +201,20 @@ func (c *Conn) Close() error {
 func disconnect(object dbus.BusObject) error {
 	ctx, cancel := context.WithTimeout(context.Background(), closeBound)
 	defer cancel()
+	if err := disconnectWithin(ctx, object); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("link still up after %v", closeBound)
+		}
+		return err
+	}
+	return nil
+}
+
+// disconnectWithin asks BlueZ to disconnect the device and waits until ctx
+// ends for it to report the link down. A device that is not connected, or
+// that BlueZ no longer knows, counts as down. When ctx ends first, the error
+// wraps ctx's.
+func disconnectWithin(ctx context.Context, object dbus.BusObject) error {
 	if err := object.CallWithContext(ctx, deviceInterface+".Disconnect", 0).Err; err != nil && !isGone(err) {
 		return err
 	}
@@ -229,7 +228,7 @@ func disconnect(object dbus.BusObject) error {
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("link still up after %v", closeBound)
+			return fmt.Errorf("link still up when the time ran out: %w", ctx.Err())
 		case <-time.After(pollInterval):
 		}
 	}

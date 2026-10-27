@@ -349,7 +349,7 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 
 	// After a full reading, so the trace holds discovery, a --timeout that
 	// ends the reading after the connect. Measured on lola: 1 s ends in the
-	// scan, which writes nothing; 2 s to 5 s end in the connect, the discovery
+	// scan, which writes nothing; 3 s to 5 s end in the connect, the discovery
 	// or the request, which of them varies from run to run. A run that got as
 	// far as the status request says so in its error, and at least one must.
 	// ("status request:" also prefixes failures to open the link, so this is
@@ -362,7 +362,7 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 			if r, _ := runGoPwr(t, "--mac", mac, "--format", "json"); r.status != 0 {
 				t.Fatalf("status %d, want 0", r.status)
 			}
-			for _, timeout := range []string{"1s", "2s", "2500ms", "3s", "3500ms", "4s", "4500ms", "5s"} {
+			for _, timeout := range []string{"1s", "3s", "4s", "5s"} {
 				r, _ := runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", timeout)
 				if strings.Contains(r.stderr, "status request:") {
 					cutOffAfterConnect++

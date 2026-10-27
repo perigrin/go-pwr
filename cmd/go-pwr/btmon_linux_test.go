@@ -311,7 +311,6 @@ func wantNoBadWrites(t *testing.T, report *btmon.Report, err error) {
 // other devices' advertisements print Data[] lines too.
 var (
 	cccdOnMarker = regexp.MustCompile(`ATT: Write Request \(0x12\) len 4\n(?:[ \t]+(?:Handle|Value Handle):[^\n]*\n)+[ \t]+Data\[2\]: 0100\n`)
-	linkUpMarker = regexp.MustCompile(`LE Connection Complete \(0x01\)\n(?:[ \t]+[^\n]*\n)*?[ \t]+Status: Success`)
 	statusMarker = regexp.MustCompile(`ATT: Write Request \(0x12\) len 3\n(?:[ \t]+(?:Handle|Value Handle):[^\n]*\n)+[ \t]+Data\[1\]: 20\n`)
 )
 
@@ -352,51 +351,58 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 	// closed after the reply, outside the budget (decision 0001, "--timeout";
 	// closeBound in ble/ble.go): a reading that printed 4 s in can exit 8 s
 	// in. So whether a given timeout ends the reading before or after the
-	// link comes up varies from run to run, and the test searches for it. A
-	// warm reading, which also puts discovery in the trace, gives the time to
-	// its reply; timeouts from 85% of that, each 15% shorter than the last,
-	// are tried, at most eight (a slow warm reading gets a long way down),
-	// until two readings have failed with the link up. That is
-	// judged from btmon's own text (an LE Connection Complete during the run),
-	// not from the error, which names the connect even when the link was up.
-	// 1 s ends in the scan and writes nothing. At least one reading must be
-	// cut off with the link up.
+	// link comes up varies from run to run, and the test searches for it.
+	//
+	// The first reading after `bluetoothctl remove` is cold (about 12 s, with
+	// discovery) and later ones are warm (3 to 7 s), so a second reading is the
+	// calibration: its time to the reply is the start of the search, at 85% of
+	// it, each try 15% shorter than the last, until two readings have failed
+	// with the link up or the search has used its budget. That is judged from
+	// btmon's own text: a successful LE Connection Complete with the
+	// controller's peer address, printed before go-pwr had been gone 200 ms (a
+	// connect finishing after that is not this run's). The error cannot tell:
+	// it names the connect even when the link was up. 1 s ends in the scan and
+	// writes nothing. At least one reading must be cut off with the link up.
 	t.Run("timeout too short", func(t *testing.T) {
-		cutOffLinkUp := 0
+		const searchBudget = 120 * time.Second
+		began := time.Now()
+		cutOffLinkUp, attempts := 0, 0
 		report, err := capturedRun(t, mac, func(c *btmonCapture) {
 			t.Log(oneShotWarmup)
-			warm := startGoPwr(t, "--mac", mac, "--format", "json")
-			if !warm.waitFor(60*time.Second, func() bool { return warm.readings() >= 1 }) {
-				t.Fatalf("no warm-up reading in 60 s; stderr %q", warm.stderr)
+			var replyAt time.Duration
+			for _, which := range []string{"cold", "warm"} {
+				r := startGoPwr(t, "--mac", mac, "--format", "json")
+				if !r.waitFor(60*time.Second, func() bool { return r.readings() >= 1 }) {
+					t.Fatalf("no %s reading in 60 s; stderr %q", which, r.stderr)
+				}
+				replyAt = time.Since(r.began)
+				if got := r.finish(45 * time.Second); got.status != 0 {
+					t.Fatalf("%s reading status %d, want 0", which, got.status)
+				}
+				t.Logf("the %s reading printed %v after go-pwr started", which, replyAt.Round(10*time.Millisecond))
 			}
-			replyAt := time.Since(warm.began)
-			if got := warm.finish(45 * time.Second); got.status != 0 {
-				t.Fatalf("warm-up status %d, want 0", got.status)
-			}
-			t.Logf("the warm-up reading printed %v after go-pwr started", replyAt.Round(10*time.Millisecond))
 
 			runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", "1s")
 			budget := float64(replyAt) * 0.85
-			for attempt := 0; attempt < 8; attempt, budget = attempt+1, budget*0.85 {
+			for ; attempts < 8 && cutOffLinkUp < 2; attempts, budget = attempts+1, budget*0.85 {
+				timeout := (time.Duration(budget) / (100 * time.Millisecond)) * (100 * time.Millisecond)
+				if timeout < 2*time.Second || time.Since(began) > searchBudget {
+					break
+				}
 				c.settle()
 				from := c.size()
-				timeout := (time.Duration(budget) / (100 * time.Millisecond)) * (100 * time.Millisecond)
-				if timeout < 2*time.Second {
-					break
-				}
 				r, _ := runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", timeout.String())
+				time.Sleep(200 * time.Millisecond)
+				limit := c.size() - from
 				c.settle()
-				if r.status == 1 && linkUpMarker.MatchString(c.since(from)) {
+				if r.status == 1 && linkUpBefore(c.since(from), mac, limit) {
 					cutOffLinkUp++
-				}
-				if cutOffLinkUp >= 2 {
-					break
 				}
 			}
 		})
 		wantNoBadWrites(t, report, err)
 		if cutOffLinkUp == 0 {
-			t.Errorf("no reading failed with the link up (the trace has %d connections): no timeout landed after the link came up, so none proves anything", report.Connections)
+			t.Errorf("no reading failed with the link up after %d tries in %v (budget %v; the trace has %d connections): no timeout landed after the link came up, so none proves anything", attempts, time.Since(began).Round(time.Second), searchBudget, report.Connections)
 		}
 	})
 
@@ -405,7 +411,7 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 	// connection lands in the discovery, whatever the scan took.
 	t.Run("SIGINT mid-discovery", func(t *testing.T) {
 		report, err := capturedRun(t, mac, func(c *btmonCapture) {
-			cancelAfter(t, c, mac, "connection", linkUpMarker)
+			cancelAfter(t, c, mac, "connection", linkUpMarker(mac))
 		})
 		wantNoBadWrites(t, report, err)
 		if report.Connections < 1 {

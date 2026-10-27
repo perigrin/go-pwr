@@ -354,8 +354,9 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 	// in. So whether a given timeout ends the reading before or after the
 	// link comes up varies from run to run, and the test searches for it. A
 	// warm reading, which also puts discovery in the trace, gives the time to
-	// its reply; timeouts from 95% of that down to 45% in steps are tried, at
-	// most six, until two readings have failed with the link up. That is
+	// its reply; timeouts from 85% of that, each 15% shorter than the last,
+	// are tried, at most eight (a slow warm reading gets a long way down),
+	// until two readings have failed with the link up. That is
 	// judged from btmon's own text (an LE Connection Complete during the run),
 	// not from the error, which names the connect even when the link was up.
 	// 1 s ends in the scan and writes nothing. At least one reading must be
@@ -375,10 +376,14 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 			t.Logf("the warm-up reading printed %v after go-pwr started", replyAt.Round(10*time.Millisecond))
 
 			runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", "1s")
-			for _, fraction := range []float64{0.95, 0.85, 0.75, 0.65, 0.55, 0.45} {
+			budget := float64(replyAt) * 0.85
+			for attempt := 0; attempt < 8; attempt, budget = attempt+1, budget*0.85 {
 				c.settle()
 				from := c.size()
-				timeout := (time.Duration(float64(replyAt)*fraction) / (100 * time.Millisecond)) * (100 * time.Millisecond)
+				timeout := (time.Duration(budget) / (100 * time.Millisecond)) * (100 * time.Millisecond)
+				if timeout < 2*time.Second {
+					break
+				}
 				r, _ := runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", timeout.String())
 				c.settle()
 				if r.status == 1 && linkUpMarker.MatchString(c.since(from)) {

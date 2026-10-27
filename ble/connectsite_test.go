@@ -1,5 +1,5 @@
 // ABOUTME: Guards the connect rule: Adapter.Connect is called from one place,
-// ABOUTME: ConnectWithRetry, and a Follower connects through that.
+// ABOUTME: connectWithRetry, and a Follower connects through that.
 
 package ble
 
@@ -16,9 +16,12 @@ import (
 // checkConnectSites parses the non-test Go files in dir and returns one
 // description per breach of the connect rule:
 //   - a call to a method named Connect is made only inside the function
-//     ConnectWithRetry, so no caller connects once and loses a reading to the
+//     connectWithRetry, so no caller connects once and loses a reading to the
 //     aborted connects that the retry exists for;
-//   - Follower.establish calls ConnectWithRetry.
+//   - Follower.establish calls connectWithRetry, which takes the hook that
+//     configures the Conn;
+//   - connectWithRetry configures each Conn before it calls ready, since ready
+//     opens the status link, which copies the hooks when it is opened.
 //
 // It fails closed: a file that does not parse, or a dir with no non-test Go
 // files, is an error. Build constraints are ignored. Blind spots: a call
@@ -32,6 +35,7 @@ func checkConnectSites(dir string) ([]string, error) {
 	var breaches []string
 	var files int
 	establishRetries := false
+	var configureAt, readyAt token.Pos
 	for _, path := range paths {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -51,18 +55,25 @@ func checkConnectSites(dir string) ([]string, error) {
 				if !ok {
 					return true
 				}
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "configure" && fn.Name.Name == "connectWithRetry" {
+					configureAt = call.Pos()
+				}
 				sel, ok := call.Fun.(*ast.SelectorExpr)
 				if !ok {
 					return true
 				}
 				switch sel.Sel.Name {
 				case "Connect":
-					if fn.Name.Name != "ConnectWithRetry" {
-						breaches = append(breaches, fmt.Sprintf("%s: %s calls Connect; only ConnectWithRetry may", fset.Position(call.Pos()), fn.Name.Name))
+					if fn.Name.Name != "connectWithRetry" {
+						breaches = append(breaches, fmt.Sprintf("%s: %s calls Connect; only connectWithRetry may", fset.Position(call.Pos()), fn.Name.Name))
 					}
-				case "ConnectWithRetry":
+				case "connectWithRetry":
 					if fn.Name.Name == "establish" {
 						establishRetries = true
+					}
+				case "ready":
+					if fn.Name.Name == "connectWithRetry" {
+						readyAt = call.Pos()
 					}
 				}
 				return true
@@ -73,7 +84,10 @@ func checkConnectSites(dir string) ([]string, error) {
 		return nil, fmt.Errorf("no non-test Go files in %s", dir)
 	}
 	if !establishRetries {
-		breaches = append(breaches, "Follower.establish does not call ConnectWithRetry")
+		breaches = append(breaches, "Follower.establish does not call connectWithRetry")
+	}
+	if !configureAt.IsValid() || !readyAt.IsValid() || configureAt > readyAt {
+		breaches = append(breaches, "connectWithRetry does not call configure before ready")
 	}
 	return breaches, nil
 }

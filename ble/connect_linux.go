@@ -43,8 +43,10 @@ type Conn struct {
 	// place of the log. beforeWrite, when set, runs after the checks and
 	// before the closing check that precedes the write; afterWrite, when set,
 	// runs right after the write returns; onNotified, when set, runs on each
-	// notification the status link takes, to count them. Tests set them
-	// before the first request.
+	// notification the status link takes, to count them. The status link
+	// copies onDrop and onNotified when it is opened, which ConnectWithRetry
+	// does before it returns, so tests set them through connectWithRetry's
+	// configure hook, and set the others before the first request.
 	onDrop      func(error)
 	beforeWrite func()
 	afterWrite  func()

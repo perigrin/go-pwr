@@ -26,10 +26,21 @@ const connectPause = time.Second
 // controller BlueZ doesn't know (ErrNotFound) won't appear by trying again,
 // and neither will anything once ctx is done.
 func (a *Adapter) ConnectWithRetry(ctx context.Context, mac string) (*Conn, error) {
+	return a.connectWithRetry(ctx, mac, nil)
+}
+
+// connectWithRetry is ConnectWithRetry with a hook: configure, when not nil,
+// runs on the Conn of each attempt before ready opens its status link, which
+// copies the Conn's test hooks as it opens. Tests set hooks through it, so
+// they reach a link opened inside the connect.
+func (a *Adapter) connectWithRetry(ctx context.Context, mac string, configure func(*Conn)) (*Conn, error) {
 	return retryConnect(ctx, connectPause, func() (*Conn, error) {
 		conn, err := a.Connect(ctx, mac)
 		if err != nil {
 			return nil, err
+		}
+		if configure != nil {
+			configure(conn)
 		}
 		return conn.ready(ctx, mac)
 	})

@@ -374,6 +374,9 @@ func (l *statusLink) await(ctx context.Context, closing <-chan struct{}, comp *s
 			return "", cur.err
 		}
 		if cur.whole {
+			if n := l.buf.discarded(); n > 0 {
+				slog.Debug("discarded bytes of an earlier reply before this reply", "discarded", n)
+			}
 			return cur.reply, nil
 		}
 		if !cur.at.IsZero() && !cur.at.Equal(seen) {
@@ -401,7 +404,8 @@ func (l *statusLink) await(ctx context.Context, closing <-chan struct{}, comp *s
 
 // noteDiscards says in err how many bytes of the read were discarded as the
 // tail of an earlier reply, if any: when a read gives up, that is part of
-// why. A read that succeeds says nothing, since the discard did no harm.
+// why. A read that succeeds says nothing in its result, since the discard did
+// no harm; await leaves a debug line for it.
 func (l *statusLink) noteDiscards(err error) error {
 	if n := l.buf.discarded(); n > 0 {
 		return fmt.Errorf("%w (discarded %d bytes of an earlier reply's tail before it)", err, n)

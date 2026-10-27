@@ -91,6 +91,9 @@ func btmonPrerequisites(pathEnv string, euid int, capEff uint64) error {
 // depend on a cache.
 func forgetController(t *testing.T, mac string) {
 	t.Helper()
+	if err := forgetRefusal(sh(t, "bluetoothctl info "+mac)); err != nil {
+		t.Fatal(err)
+	}
 	sh(t, "bluetoothctl remove "+mac)
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
@@ -107,6 +110,7 @@ type btmonCapture struct {
 	t      *testing.T
 	cmd    *exec.Cmd
 	file   string
+	out    *syncBuffer // btmon's text of the packets so far, which it prints as it records
 	exited chan struct{}
 }
 
@@ -116,7 +120,8 @@ func startBtmon(t *testing.T) *btmonCapture {
 	t.Helper()
 	c := &btmonCapture{t: t, file: filepath.Join(t.TempDir(), "capture.btsnoop")}
 	c.cmd = commandInGroup("btmon", "-w", c.file)
-	c.cmd.Stdout, c.cmd.Stderr = &syncBuffer{}, &syncBuffer{}
+	c.out = &syncBuffer{}
+	c.cmd.Stdout, c.cmd.Stderr = c.out, &syncBuffer{}
 	if err := c.cmd.Start(); err != nil {
 		t.Fatalf("start btmon: %v", err)
 	}
@@ -134,6 +139,22 @@ func startBtmon(t *testing.T) *btmonCapture {
 	}
 	t.Fatal("btmon wrote nothing in 10 s")
 	return nil
+}
+
+// count says how many times marker has appeared in what btmon has printed.
+func (c *btmonCapture) count(marker string) int {
+	return strings.Count(c.out.String(), marker)
+}
+
+// waitForMore waits up to limit for marker to appear more often than it has
+// before, polling fast so that a signal can follow within a few ms.
+func (c *btmonCapture) waitForMore(marker string, before int, limit time.Duration) bool {
+	for deadline := time.Now().Add(limit); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if c.count(marker) > before {
+			return true
+		}
+	}
+	return false
 }
 
 // stop ends the capture and returns btmon's text decoding of it.
@@ -168,17 +189,17 @@ func checkTrace(t *testing.T, trace, mac string) (*btmon.Report, error) {
 		lines = append(lines, fmt.Sprintf("%3d x %s", n, line))
 	}
 	sort.Strings(lines)
-	t.Logf("%d connections to %s, handle map %+v, writes on them:\n%s", report.Connections, mac, report.Map, strings.Join(lines, "\n"))
+	t.Logf("%d connections to %s, %d writes seen on any connection, handle map %+v, writes on the controller's:\n%s", report.Connections, mac, report.WritesSeen, report.Map, strings.Join(lines, "\n"))
 	return report, err
 }
 
 // capturedRun records the controller's connections while run goes, after
 // clearing BlueZ's GATT cache, and returns the checker's verdict.
-func capturedRun(t *testing.T, mac string, run func()) (*btmon.Report, error) {
+func capturedRun(t *testing.T, mac string, run func(c *btmonCapture)) (*btmon.Report, error) {
 	t.Helper()
 	forgetController(t, mac)
 	c := startBtmon(t)
-	run()
+	run(c)
 	return checkTrace(t, c.stop(), mac)
 }
 
@@ -186,7 +207,7 @@ func TestBtmonWritesOnlyStatusRequest(t *testing.T) {
 	mac := requireBtmon(t)
 
 	t.Run("one-shot", func(t *testing.T) {
-		report, err := capturedRun(t, mac, func() {
+		report, err := capturedRun(t, mac, func(*btmonCapture) {
 			if r, _ := runGoPwr(t, "--mac", mac, "--format", "json"); r.status != 0 {
 				t.Fatalf("status %d, want 0", r.status)
 			}
@@ -201,7 +222,7 @@ func TestBtmonWritesOnlyStatusRequest(t *testing.T) {
 
 	for _, mode := range []string{"--poll=8s", "--follow=8s"} {
 		t.Run(mode, func(t *testing.T) {
-			report, err := capturedRun(t, mac, func() {
+			report, err := capturedRun(t, mac, func(*btmonCapture) {
 				r := startGoPwr(t, "--mac", mac, mode, "--format", "json")
 				if !r.waitFor(90*time.Second, func() bool { return r.readings() >= 3 }) {
 					t.Fatalf("fewer than 3 readings in 90 s; stderr %q", r.stderr)
@@ -236,37 +257,76 @@ func requireBtmon(t *testing.T) string {
 
 // wantNoBadWrites fails the test if the checker found a write that is not
 // allowed. A trace with no connection or no handle map is accepted only when
-// it holds no writes at all, which is what a reading that never got as far as
-// connecting leaves.
+// no ATT write was sent on any connection, recognised or not, which is what a
+// reading that never got as far as connecting leaves.
 func wantNoBadWrites(t *testing.T, report *btmon.Report, err error) {
 	t.Helper()
 	switch {
 	case err == nil:
-	case (errors.Is(err, btmon.ErrNoConnection) || errors.Is(err, btmon.ErrNoHandleMap)) && len(report.Writes) == 0:
+	case (errors.Is(err, btmon.ErrNoConnection) || errors.Is(err, btmon.ErrNoHandleMap)) && report.WritesSeen == 0:
 		t.Logf("the reading ended before it wrote anything: %v", err)
 	default:
 		t.Error(err)
 	}
 }
 
+// What btmon prints for the writes go-pwr makes: the CCCD set to notifications
+// on, and the status request. A notification's Data[20] does not match.
+const (
+	cccdOnMarker  = "Data[2]: 0100"
+	statusMarker  = "Data[1]: 20\n"
+	oneShotWarmup = "a full reading first, so the trace holds discovery and the reading after it is not a cold one"
+)
+
+// cancelAfter starts go-pwr, signals it with SIGINT as soon as btmon prints
+// one more of marker, and checks that it exits. The signal can overtake the
+// reply or follow it; either way go-pwr must stop.
+func cancelAfter(t *testing.T, c *btmonCapture, mac, marker string) {
+	t.Helper()
+	before := c.count(marker)
+	r := startGoPwr(t, "--mac", mac, "--format", "json")
+	if !c.waitForMore(marker, before, 60*time.Second) {
+		t.Fatalf("btmon showed no %q within 60 s of starting go-pwr; stderr %q", marker, r.stderr)
+	}
+	r.cmd.Process.Signal(syscall.SIGINT)
+	got := r.finish(45 * time.Second)
+	if got.status > 1 {
+		t.Errorf("status %d after SIGINT, want 0 (the reading was done) or 1", got.status)
+	}
+}
+
 func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 	mac := requireBtmon(t)
 
-	// A reading takes at least 2.8 s on lola, so 1 s ends in the scan and 3 s
-	// usually in the connect or the request.
+	// After a full reading, so the trace holds discovery, a --timeout that
+	// ends the reading after the connect. Measured on lola: 1 s ends in the
+	// scan, which writes nothing; 2 s to 5 s end in the connect, the discovery
+	// or the request, which of them varies from run to run. A run that got as
+	// far as the status request says so in its error, and at least one must.
 	t.Run("timeout too short", func(t *testing.T) {
-		report, err := capturedRun(t, mac, func() {
-			for _, timeout := range []string{"1s", "3s"} {
-				runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", timeout)
+		cutOffInRequest := 0
+		report, err := capturedRun(t, mac, func(*btmonCapture) {
+			t.Log(oneShotWarmup)
+			if r, _ := runGoPwr(t, "--mac", mac, "--format", "json"); r.status != 0 {
+				t.Fatalf("status %d, want 0", r.status)
+			}
+			for _, timeout := range []string{"1s", "2s", "2500ms", "3s", "3500ms", "4s", "4500ms", "5s"} {
+				r, _ := runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", timeout)
+				if strings.Contains(r.stderr, "status request:") {
+					cutOffInRequest++
+				}
 			}
 		})
 		wantNoBadWrites(t, report, err)
+		if cutOffInRequest == 0 || report.Connections < 2 {
+			t.Errorf("%d readings were cut off in the status request and the trace has %d connections: no timeout landed after the connect, so none proves anything", cutOffInRequest, report.Connections)
+		}
 	})
 
 	// With the GATT cache just cleared a reading takes about 12 s, so 6 s
-	// lands after the connect and in the discovery or the request.
-	t.Run("SIGINT mid-reading", func(t *testing.T) {
-		report, err := capturedRun(t, mac, func() {
+	// lands after the connect and in the discovery.
+	t.Run("SIGINT mid-discovery", func(t *testing.T) {
+		report, err := capturedRun(t, mac, func(*btmonCapture) {
 			interrupt(t, syscall.SIGINT, 6*time.Second, "--mac", mac, "--format", "json")
 		})
 		wantNoBadWrites(t, report, err)
@@ -275,9 +335,40 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 		}
 	})
 
+	// SIGINT the moment btmon prints the CCCD write, then the moment it
+	// prints the status request: the cancel comes after each of the two
+	// writes go-pwr makes, and nothing else may follow it.
+	t.Run("SIGINT after the CCCD and after the status request", func(t *testing.T) {
+		report, err := capturedRun(t, mac, func(c *btmonCapture) {
+			t.Log(oneShotWarmup)
+			if r, _ := runGoPwr(t, "--mac", mac, "--format", "json"); r.status != 0 {
+				t.Fatalf("status %d, want 0", r.status)
+			}
+			cancelAfter(t, c, mac, cccdOnMarker)
+			cancelAfter(t, c, mac, statusMarker)
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		cccdOn, status := 0, 0
+		for _, w := range report.Writes {
+			switch {
+			case w.Handle == report.Map.FFF1CCCD && string(w.Data) == "\x01\x00":
+				cccdOn++
+			case w.Handle == report.Map.FFF2Value:
+				status++
+			}
+		}
+		// The warm-up and both cancelled runs each turned notifications on;
+		// the warm-up and the second cancelled run each sent the request.
+		if cccdOn < 3 || status < 2 {
+			t.Errorf("%d CCCD-on writes and %d status requests in the trace, want at least 3 and 2", cccdOn, status)
+		}
+	})
+
 	t.Run("dropped --follow link", func(t *testing.T) {
 		t.Cleanup(func() { sh(t, "bluetoothctl disconnect "+mac) })
-		report, err := capturedRun(t, mac, func() {
+		report, err := capturedRun(t, mac, func(*btmonCapture) {
 			r := startGoPwr(t, "--mac", mac, "--follow=5s", "--format", "json")
 			if !r.waitFor(60*time.Second, func() bool { return r.readings() >= 2 }) {
 				t.Fatalf("fewer than 2 readings in 60 s; stderr %q", r.stderr)

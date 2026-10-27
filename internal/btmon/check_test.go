@@ -430,3 +430,89 @@ func TestBtmonCheckerCountsUnknownOpcodesInWritesSeen(t *testing.T) {
 		t.Errorf("a Read Request counted as a write: %d", report.WritesSeen)
 	}
 }
+
+func TestBtmonCheckerReportsEachLinkOfTheRealTrace(t *testing.T) {
+	report, err := Check(strings.NewReader(realTrace(t)), controller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Links) != 5 {
+		t.Fatalf("%d links, want 5", len(report.Links))
+	}
+	// Every link in the capture has handle 64, so a write is told to its
+	// link by the connection event before it, not by its handle.
+	for i, l := range report.Links {
+		if l.Handle != 64 || l.Up == 0 || l.Down <= l.Up {
+			t.Errorf("link %d is %+v, want handle 64, brought up before it went down", i, l)
+		}
+		if i > 0 && l.Up <= report.Links[i-1].Down {
+			t.Errorf("link %d came up at line %d, before link %d went down at line %d", i, l.Up, i-1, report.Links[i-1].Down)
+		}
+	}
+	used := map[int]bool{}
+	for _, w := range report.Writes {
+		if w.Link < 0 || w.Link >= len(report.Links) {
+			t.Fatalf("write at line %d has link %d of %d", w.Line, w.Link, len(report.Links))
+		}
+		l := report.Links[w.Link]
+		if w.Line < l.Up || w.Line > l.Down {
+			t.Errorf("write at line %d is on link %+v, which was not up then", w.Line, l)
+		}
+		used[w.Link] = true
+	}
+	if len(used) != 5 {
+		t.Errorf("writes on %d links, want all 5", len(used))
+	}
+}
+
+// withLeftoverLink returns the real trace with a link to the controller
+// ahead of its first one, as `bluetoothctl connect` makes before a run. The
+// extra link is dropped before the first real one comes up only if dropped.
+func withLeftoverLink(t *testing.T, dropped bool) string {
+	t.Helper()
+	lines := strings.Split(realTrace(t), "\n")
+	for i, l := range lines {
+		if strings.HasPrefix(l, "      LE Connection Complete") {
+			extra := connectionTo(63, controller)
+			if dropped {
+				extra = append(extra,
+					"> HCI Event: Disconnect Complete (0x05) plen 4            #1 [hci0] 1.000000",
+					"        Status: Success (0x00)",
+					"        Handle: 63 Address: "+controller+" (OUI C3-00-00)",
+					"        Reason: Connection Terminated By Local Host (0x16)")
+			}
+			out := append([]string{}, lines[:i-1]...)
+			out = append(out, extra...)
+			return strings.Join(append(out, lines[i-1:]...), "\n")
+		}
+	}
+	t.Fatal("no connection in the trace")
+	return ""
+}
+
+func TestBtmonFirstRequestOnNewLink(t *testing.T) {
+	check := func(trace string) error {
+		report, err := Check(strings.NewReader(trace), controller)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return report.FirstRequestOnNewLink()
+	}
+
+	if err := check(withLeftoverLink(t, true)); err != nil {
+		t.Errorf("a leftover link dropped before the request's link came up: %v", err)
+	}
+	if err := check(withLeftoverLink(t, false)); err == nil {
+		t.Error("a leftover link that was never dropped passed")
+	}
+	if err := check(realTrace(t)); err == nil {
+		t.Error("a trace with no link before the request's passed")
+	}
+}
+
+func TestBtmonFirstRequestOnNewLinkNeedsARequest(t *testing.T) {
+	var report Report
+	if err := report.FirstRequestOnNewLink(); err == nil {
+		t.Error("an empty report passed")
+	}
+}

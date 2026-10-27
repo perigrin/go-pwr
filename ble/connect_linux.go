@@ -43,8 +43,10 @@ type Conn struct {
 	// place of the log. beforeWrite, when set, runs after the checks and
 	// before the closing check that precedes the write; afterWrite, when set,
 	// runs right after the write returns; onNotified, when set, runs on each
-	// notification the status link takes, to count them. Tests set them
-	// before the first request.
+	// notification the status link takes, to count them. The status link
+	// copies onDrop and onNotified when it is opened, which ConnectWithRetry
+	// does before it returns, so tests set them through connectWithRetry's
+	// configure hook, and set the others before the first request.
 	onDrop      func(error)
 	beforeWrite func()
 	afterWrite  func()
@@ -200,4 +202,61 @@ func ignoreGone(err error) error {
 		return nil
 	}
 	return err
+}
+
+// isNotConnected reports whether err says BlueZ found the device not
+// connected.
+func isNotConnected(err error) bool {
+	return dbusErrorName(err) == "org.bluez.Error.NotConnected"
+}
+
+// linkLost turns an error from opening the status link into the error of a
+// lost link, closed with closeLink, or returns nil if the link is not lost. A
+// link is lost when up says it is down, whichever step of opening gave the
+// error, and not only when the error is the one that BlueZ gives for it. That
+// error (isNotConnected) counts too, since the Connected property can lag a
+// link that is going down: on lola, a run killed while it was closing left a
+// link that the next run found up and that failed with NotConnected when its
+// status link was opened. An error with the link still up, or one with no
+// answer on the link, is not a loss: it is left for the request, which opens
+// the link again and reports it. A lost link is closed first, so the next
+// attempt meets a link that is down and makes a new one; the error is
+// retryable, and joined with the close's own error if that failed.
+func linkLost(mac string, openErr error, up func() (bool, error), closeLink func() error) error {
+	if openErr == nil {
+		return nil
+	}
+	if !isNotConnected(openErr) {
+		if isUp, err := up(); err != nil || isUp {
+			return nil
+		}
+	}
+	err := fmt.Errorf("connect %s: the link was lost while opening it: %w", mac, openErr)
+	if closeErr := closeLink(); closeErr != nil {
+		err = errors.Join(err, fmt.Errorf("close the lost link: %w", closeErr))
+	}
+	return retryableError(err)
+}
+
+// ready opens the status link of a Conn that Connect returned, so a link
+// that an earlier run left behind and that is going down is found here, where
+// ConnectWithRetry can connect again, and not in the request. Only the loss
+// of the link is reported from here, whichever step of opening found it (see
+// linkLost): any other error from opening the status link is left for
+// RequestStatus, which opens it again and reports it as it always has.
+func (c *Conn) ready(ctx context.Context, mac string) (*Conn, error) {
+	up := func() (bool, error) {
+		// The check runs after ctx may be done, so it has a bound of its own.
+		checkCtx, cancel := context.WithTimeout(context.Background(), linkCheckBound)
+		defer cancel()
+		up, err := connected(checkCtx, c.object)
+		if isGone(err) {
+			return false, nil
+		}
+		return up, err
+	}
+	if err := linkLost(mac, c.openStatusLink(ctx), up, c.Close); err != nil {
+		return nil, err
+	}
+	return c, nil
 }

@@ -29,7 +29,7 @@ type Follower struct {
 	closed bool
 
 	// configure, when set, runs on each Conn the Follower makes, before its
-	// first request. Tests set it before the first Read.
+	// status link is opened. Tests set it before the first Read.
 	configure func(*Conn)
 }
 
@@ -101,14 +101,7 @@ func (f *Follower) establish(ctx context.Context) (*Conn, error) {
 	if _, err := f.adapter.Scan(ctx, f.mac); err != nil {
 		return nil, err
 	}
-	conn, err := f.adapter.ConnectWithRetry(ctx, f.mac)
-	if err != nil {
-		return nil, err
-	}
-	if f.configure != nil {
-		f.configure(conn)
-	}
-	return conn, nil
+	return f.adapter.connectWithRetry(ctx, f.mac, f.configure)
 }
 
 // watch ends the reading with errLinkDown as soon as the link is seen down.

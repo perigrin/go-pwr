@@ -226,7 +226,9 @@ func TestReorderSwapTally(t *testing.T) {
 // protocol.md, Plausibility bounds ("A battery field of 00000 is accepted"),
 // records as accepted. No warning fires either. The same swap of a real
 // framed lola reply never gets that far: chunk 0 holds the leading space, so
-// the Assembler refuses the reply as not framed.
+// the chunks before it are discarded as the tail of an earlier reply, the
+// reply then starts at chunk 0, and the Assembler refuses what it makes as
+// not whole.
 func TestReorderSwap03ReportsZeroVolts(t *testing.T) {
 	cs := reorderCorpora(t)
 
@@ -249,8 +251,8 @@ func TestReorderSwap03ReportsZeroVolts(t *testing.T) {
 
 	for _, c := range cs[1:] {
 		o := deliver(t, c, swap(0, 3))
-		if !errors.Is(o.asmErr, ErrNotFramed) {
-			t.Errorf("%s: swap 0<->3 error = %v, want ErrNotFramed", c.name, o.asmErr)
+		if !errors.Is(o.asmErr, ErrNotWhole) {
+			t.Errorf("%s: swap 0<->3 error = %v, want ErrNotWhole", c.name, o.asmErr)
 		}
 	}
 }

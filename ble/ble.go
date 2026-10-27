@@ -130,6 +130,12 @@
 // the D-Bus sequence boundary instead, because reconnecting is simpler and
 // stronger, and costs one scan and connect per failed reading.
 //
+// A reply left behind by a run that was killed outright is another way for a
+// tail to arrive after a request's write. A read throws away the bytes
+// that arrive before its reply has started, up to the space that starts
+// every reply (see status.Assembler), and says how many bytes that was only
+// if the read then fails.
+//
 // Close ends a Follower: a Read after it returns ErrNotConnected and makes no
 // connection. Close can't interrupt a Read in flight; it waits for it, so
 // cancel the Read's context first to end it sooner.

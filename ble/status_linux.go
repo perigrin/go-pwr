@@ -83,6 +83,28 @@ func (c *Conn) RequestStatus(ctx context.Context) (string, error) {
 	return reply, nil
 }
 
+// openStatusLink opens the status link of c if it has none, as the first
+// RequestStatus would, without writing anything. A link that fails to open
+// is left closed.
+func (c *Conn) openStatusLink(ctx context.Context) error {
+	c.requests.Lock()
+	defer c.requests.Unlock()
+	select {
+	case <-c.closing:
+		return fmt.Errorf("status link: %w: the connection is closed", ErrNotConnected)
+	default:
+	}
+	if c.link != nil {
+		return nil
+	}
+	link, err := c.openLink(ctx)
+	if err != nil {
+		return err
+	}
+	c.link = link
+	return nil
+}
+
 // statusLink is what a Conn needs to read status: a D-Bus connection of its
 // own, the characteristics found on it, and the buffer of the current read.
 //
@@ -352,6 +374,9 @@ func (l *statusLink) await(ctx context.Context, closing <-chan struct{}, comp *s
 			return "", cur.err
 		}
 		if cur.whole {
+			if n := l.buf.discarded(); n > 0 {
+				slog.Debug("discarded bytes of an earlier reply before this reply", "discarded", n)
+			}
 			return cur.reply, nil
 		}
 		if !cur.at.IsZero() && !cur.at.Equal(seen) {
@@ -360,7 +385,7 @@ func (l *statusLink) await(ctx context.Context, closing <-chan struct{}, comp *s
 		}
 		now := time.Now()
 		if err := comp.Check(now, cur.reply); err != nil {
-			return "", err
+			return "", l.noteDiscards(err)
 		}
 		timer := time.NewTimer(comp.Deadline().Sub(now))
 		select {
@@ -368,13 +393,24 @@ func (l *statusLink) await(ctx context.Context, closing <-chan struct{}, comp *s
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
-			return "", fmt.Errorf("%w: %w", ctx.Err(), comp.Check(comp.Deadline(), cur.reply))
+			return "", l.noteDiscards(fmt.Errorf("%w: %w", ctx.Err(), comp.Check(comp.Deadline(), cur.reply)))
 		case <-closing:
 			timer.Stop()
 			return "", fmt.Errorf("%w: the connection was closed", ErrNotConnected)
 		}
 		timer.Stop()
 	}
+}
+
+// noteDiscards says in err how many bytes of the read were discarded as the
+// tail of an earlier reply, if any: when a read gives up, that is part of
+// why. A read that succeeds says nothing in its result, since the discard did
+// no harm; await leaves a debug line for it.
+func (l *statusLink) noteDiscards(err error) error {
+	if n := l.buf.discarded(); n > 0 {
+		return fmt.Errorf("%w (discarded %d bytes before the reply's last space)", err, n)
+	}
+	return err
 }
 
 // drain waits for the reply of the last request, which did not complete, to

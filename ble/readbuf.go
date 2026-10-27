@@ -153,3 +153,11 @@ func (b *readBuffer) drop(err error) {
 		b.dropped(err)
 	}
 }
+
+// discarded is how many bytes of the current read were thrown away as the
+// tail of an earlier reply (see status.Assembler).
+func (b *readBuffer) discarded() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.asm.Discarded()
+}

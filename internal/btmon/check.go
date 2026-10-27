@@ -46,6 +46,14 @@ type Report struct {
 	StatusRequests int     // writes of 0x20 to FFF2
 }
 
+// ErrNoConnection and ErrNoHandleMap are what Check returns for a trace that
+// shows nothing to judge. The report still holds the writes it found, but
+// without a handle map they cannot be told apart.
+var (
+	ErrNoConnection = errors.New("no connection to the controller in the trace")
+	ErrNoHandleMap  = errors.New("no handle map from discovery in the trace")
+)
+
 // Check reads btmon's text output (btmon -r on a capture) and reports the
 // writes made on connections to the controller at mac. It returns an error
 // naming every write that go-pwr must never make, and also when the trace
@@ -88,18 +96,17 @@ func Check(trace io.Reader, mac string) (*Report, error) {
 		}
 	}
 
-	var problems []error
-	if report.Connections == 0 {
-		problems = append(problems, fmt.Errorf("no connection to %s in the trace", mac))
-	}
-	if !report.Map.complete() {
-		problems = append(problems, fmt.Errorf("no handle map for %s in the trace: discovery named FFF0 at %#04x, FFF1 at %#04x, FFF2 at %#04x", mac, report.Map.FFF0Start, report.Map.FFF1Value, report.Map.FFF2Value))
-	}
-	if len(problems) > 0 {
-		return report, errors.Join(problems...)
-	}
 	for _, w := range writes {
 		report.Writes = append(report.Writes, Write{Line: w.line, Conn: w.conn, Opcode: w.opcode, Handle: w.handle, Data: w.data})
+	}
+	if report.Connections == 0 {
+		return report, fmt.Errorf("%w: %s", ErrNoConnection, mac)
+	}
+	if !report.Map.complete() {
+		return report, fmt.Errorf("%w for %s: discovery named FFF0 at %#04x, FFF1 at %#04x, FFF2 at %#04x", ErrNoHandleMap, mac, report.Map.FFF0Start, report.Map.FFF1Value, report.Map.FFF2Value)
+	}
+	var problems []error
+	for _, w := range writes {
 		if err := report.Map.judge(w); err != nil {
 			problems = append(problems, fmt.Errorf("line %d: %w", w.line, err))
 		} else if w.handle == report.Map.FFF2Value {

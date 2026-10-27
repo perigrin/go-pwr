@@ -47,7 +47,7 @@ func TestFollowHoldsOneConnection(t *testing.T) {
 	t.Logf("gaps %.1f", gaps)
 	for i, gap := range gaps[1:] {
 		if gap < 4 || gap > 6 {
-			t.Errorf("reading %d came %.1f s after the one before, want 5 s", i+2, gap)
+			t.Errorf("reading %d came %.1f s after the one before, want 5 s", i+3, gap)
 		}
 	}
 	if n := failedReadings(got.stderr); n != 0 {
@@ -79,9 +79,18 @@ func TestFollowReconnectsAfterDrop(t *testing.T) {
 	if !strings.Contains(r.stderr.String(), "dropped") {
 		t.Errorf("stderr %q does not say the link dropped", r.stderr)
 	}
-	// The link is made again at a following interval, and readings resume.
-	if !r.waitFor(60*time.Second, func() bool { return r.readings() >= before+3 }) {
-		t.Fatalf("readings did not resume in 60 s after the drop (%d before it, %d now); stderr:\n%s", before, r.readings(), r.stderr)
+	// The link is made again at the next interval, and readings resume. That
+	// reading connects and reads within --timeout (20 s by default), so the
+	// first one after the error comes within an interval plus that.
+	failedAt := time.Now()
+	if !r.waitFor(30*time.Second, func() bool { return r.readings() > before }) {
+		t.Fatalf("no reading within 30 s of the error (%d before the drop, %d now); stderr:\n%s", before, r.readings(), r.stderr)
+	}
+	if took := time.Since(failedAt); took > 25*time.Second {
+		t.Errorf("the first reading after the error came %v later, want within one 5 s interval and the 20 s timeout", took)
+	}
+	if !r.waitFor(30*time.Second, func() bool { return r.readings() >= before+3 }) {
+		t.Fatalf("readings did not go on after the drop (%d before it, %d now); stderr:\n%s", before, r.readings(), r.stderr)
 	}
 	got := r.stop(syscall.SIGTERM)
 	if got.status != 0 {
@@ -125,16 +134,54 @@ func TestFollowSignalsExit0(t *testing.T) {
 
 func TestFollowSignalDuringFirstReading(t *testing.T) {
 	mac := requireHardware(t)
-	// The first reading scans and connects for seconds, so these land in the
-	// scan and in the connect.
+	// The first reading scans and connects for 3 s or more, so these land in
+	// the scan and in the connect. A reading that ignored the signal would
+	// finish and print before go-pwr exited.
 	for _, delay := range []time.Duration{500 * time.Millisecond, 2 * time.Second} {
 		t.Run(delay.String(), func(t *testing.T) {
-			r, _ := interrupt(t, syscall.SIGTERM, delay, "--mac", mac, "--follow=10s", "--format", "json")
+			r, took := interrupt(t, syscall.SIGTERM, delay, "--mac", mac, "--follow=10s", "--format", "json")
 			if r.status != 0 {
 				t.Errorf("status %d, want 0", r.status)
 			}
+			if r.stdout != "" {
+				t.Errorf("stdout %q, want nothing: the reading should have been cut off by the signal", r.stdout)
+			}
 			if r.stderr != "" {
 				t.Errorf("stderr %q, want nothing: a signal is not an error", r.stderr)
+			}
+			if took > delay+4*time.Second {
+				t.Errorf("took %v to exit after a signal at %v, want the reading cut off", took, delay)
+			}
+			requireLinkDown(t, mac)
+		})
+	}
+}
+
+func TestFollowSignalDuringHeldReading(t *testing.T) {
+	mac := requireHardware(t)
+	// With a 1 s interval the next reading starts 0.5 to 0.8 s after a reply
+	// arrives and takes 0.2 to 0.5 s on the held connection, so signals at
+	// these offsets land in or just before the next reading. Which of the two
+	// can't be seen from outside, so every offset must exit promptly, 0, with
+	// the link down and nothing on stderr.
+	for _, offset := range []time.Duration{700 * time.Millisecond, 850 * time.Millisecond, time.Second} {
+		t.Run(offset.String(), func(t *testing.T) {
+			r := startGoPwr(t, "--mac", mac, "--follow=1s", "--format", "json")
+			if !r.waitFor(45*time.Second, func() bool { return r.readings() >= 3 }) {
+				t.Fatalf("fewer than 3 readings in 45 s; stderr %q", r.stderr)
+			}
+			time.Sleep(offset)
+			signalled := time.Now()
+			got := r.stop(syscall.SIGTERM)
+			if got.status != 0 {
+				t.Errorf("status %d, want 0", got.status)
+			}
+			if took := time.Since(signalled); took > 10*time.Second {
+				t.Errorf("took %v to exit, want a prompt exit", took)
+			}
+			wantOnlyJSONObjects(t, got.stdout)
+			if got.stderr != "" {
+				t.Errorf("stderr %q, want nothing: a signal is not an error", got.stderr)
 			}
 			requireLinkDown(t, mac)
 		})
@@ -148,7 +195,12 @@ func TestFollowLongReadingNoMakeUp(t *testing.T) {
 	// missed are not made up. A reading on the held connection after that
 	// takes well under 1 s.
 	r := startGoPwr(t, "--mac", mac, "--follow=1s", "--format", "json")
+	if !r.waitFor(45*time.Second, func() bool { return r.readings() >= 1 }) {
+		t.Fatalf("no reading in 45 s; stderr %q", r.stderr)
+	}
+	firstArrival := time.Since(r.began)
 	time.Sleep(30 * time.Second)
+	stopped := time.Since(r.began)
 	got := r.stop(syscall.SIGTERM)
 	if got.status != 0 {
 		t.Errorf("status %d, want 0", got.status)
@@ -159,25 +211,29 @@ func TestFollowLongReadingNoMakeUp(t *testing.T) {
 		t.Fatalf("%d readings in 30 s, want at least 10", len(readings))
 	}
 	gaps := uptimeGaps(readings)
-	t.Logf("gaps %.1f", gaps)
-	// Make-up readings would follow the first, long one in a burst of gaps
-	// near zero. A reply's latency moves single gaps by up to a second, a slow
-	// one followed by a quick one, so the mean of the rest is the interval's
-	// measure, and no gap may be a burst.
+	t.Logf("first reading arrived %.1f s after the start; gaps %.1f", firstArrival.Seconds(), gaps)
+	// A schedule that made up the intervals the first reading overran would
+	// follow it with a burst of readings, each as soon as the one before.
+	// Counted from the first arrival, 1 s intervals allow one reading per
+	// second, plus the first and the one in flight at the stop.
+	if max := int((stopped - firstArrival).Seconds()) + 2; len(readings) > max {
+		t.Errorf("%d readings in %.0f s at a 1 s interval, want at most %d: make-up readings", len(readings), (stopped - firstArrival).Seconds(), max)
+	}
+	// Reply latency moves single gaps by up to a second, a slow reply
+	// followed by a quick one, but no three in a row come in under two
+	// seconds unless readings are made up.
+	for i := 1; i+2 < len(gaps); i++ {
+		if sum := gaps[i] + gaps[i+1] + gaps[i+2]; sum < 2.0 {
+			t.Errorf("readings %d to %d came %.1f s after reading %d: overlap or make-up readings", i+2, i+4, sum, i+1)
+		}
+	}
 	rest := gaps[1:]
 	sum := 0.0
-	for i, gap := range rest {
+	for _, gap := range rest {
 		sum += gap
-		if gap < 0.2 {
-			t.Errorf("reading %d came %.2f s after the one before: overlap or make-up readings", i+2, gap)
-		}
 	}
 	if mean := sum / float64(len(rest)); mean < 0.9 || mean > 1.4 {
 		t.Errorf("mean gap %.2f s, want the 1 s interval within 0.4 s", mean)
-	}
-	// 30 s of 1 s intervals, less the connect, with no make-up on top.
-	if len(readings) > 31 {
-		t.Errorf("%d readings in 30 s at a 1 s interval: make-up readings", len(readings))
 	}
 	requireLinkDown(t, mac)
 }

@@ -4,6 +4,8 @@
 package main
 
 import (
+	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -171,6 +173,10 @@ func TestFollowSignalDuringHeldReading(t *testing.T) {
 				t.Fatalf("fewer than 3 readings in 45 s; stderr %q", r.stderr)
 			}
 			time.Sleep(offset)
+			// A reading is stamped with the uptime when its reply arrives. One
+			// stamped after the signal was sent finished although it was
+			// signalled, so the Read was not cut off.
+			signalUptime := uptimeNow(t)
 			signalled := time.Now()
 			got := r.stop(syscall.SIGTERM)
 			if got.status != 0 {
@@ -180,12 +186,32 @@ func TestFollowSignalDuringHeldReading(t *testing.T) {
 				t.Errorf("took %v to exit, want a prompt exit", took)
 			}
 			wantOnlyJSONObjects(t, got.stdout)
+			for i, rd := range parseReadings(t, got.stdout) {
+				if rd.uptime > signalUptime+0.05 {
+					t.Errorf("reading %d was received %.2f s after the signal was sent: the Read was not cut off", i+1, rd.uptime-signalUptime)
+				}
+			}
 			if got.stderr != "" {
 				t.Errorf("stderr %q, want nothing: a signal is not an error", got.stderr)
 			}
 			requireLinkDown(t, mac)
 		})
 	}
+}
+
+// uptimeNow is the machine's uptime in seconds, the clock of a reading's
+// uptime_s.
+func uptimeNow(t *testing.T) float64 {
+	t.Helper()
+	raw, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, err := strconv.ParseFloat(strings.Fields(string(raw))[0], 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return up
 }
 
 func TestFollowLongReadingNoMakeUp(t *testing.T) {
@@ -198,9 +224,7 @@ func TestFollowLongReadingNoMakeUp(t *testing.T) {
 	if !r.waitFor(45*time.Second, func() bool { return r.readings() >= 1 }) {
 		t.Fatalf("no reading in 45 s; stderr %q", r.stderr)
 	}
-	firstArrival := time.Since(r.began)
 	time.Sleep(30 * time.Second)
-	stopped := time.Since(r.began)
 	got := r.stop(syscall.SIGTERM)
 	if got.status != 0 {
 		t.Errorf("status %d, want 0", got.status)
@@ -211,13 +235,15 @@ func TestFollowLongReadingNoMakeUp(t *testing.T) {
 		t.Fatalf("%d readings in 30 s, want at least 10", len(readings))
 	}
 	gaps := uptimeGaps(readings)
-	t.Logf("first reading arrived %.1f s after the start; gaps %.1f", firstArrival.Seconds(), gaps)
+	t.Logf("gaps %.1f", gaps)
 	// A schedule that made up the intervals the first reading overran would
-	// follow it with a burst of readings, each as soon as the one before.
-	// Counted from the first arrival, 1 s intervals allow one reading per
-	// second, plus the first and the one in flight at the stop.
-	if max := int((stopped - firstArrival).Seconds()) + 2; len(readings) > max {
-		t.Errorf("%d readings in %.0f s at a 1 s interval, want at most %d: make-up readings", len(readings), (stopped - firstArrival).Seconds(), max)
+	// follow it with a burst of readings, each as soon as the one before. From
+	// the first reply to the last, 1 s intervals allow one reading a second,
+	// plus two for the jitter of a reply's latency. The span is taken from the
+	// readings' own uptime_s, not from when this test saw the first one.
+	span := readings[len(readings)-1].uptime - readings[0].uptime
+	if max := int(span) + 2; len(readings)-1 > max {
+		t.Errorf("%d readings after the first in %.1f s at a 1 s interval, want at most %d: make-up readings", len(readings)-1, span, max)
 	}
 	// Reply latency moves single gaps by up to a second, a slow reply
 	// followed by a quick one, but no three in a row come in under two

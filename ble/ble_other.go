@@ -73,3 +73,8 @@ func (f *Follower) Close() error {
 func (c *Conn) ready(ctx context.Context, mac string) (*Conn, error) {
 	return c, nil
 }
+
+// dropLeftover returns ErrUnsupportedPlatform.
+func (a *Adapter) dropLeftover(ctx context.Context, mac string) error {
+	return ErrUnsupportedPlatform
+}

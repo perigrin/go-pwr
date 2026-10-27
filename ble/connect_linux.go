@@ -60,7 +60,9 @@ func devicePath(a *Adapter, mac string) dbus.ObjectPath {
 
 // Connect opens a link to the controller at mac, which the caller found with
 // Scan first, because BlueZ connects only to a device it already has an
-// object for. A link that an earlier run left up is reused.
+// object for. A link that is already up is reused, which Connect leaves to
+// its caller to rule out: a reading goes through ConnectWithRetry, which
+// drops such a link first (see dropLeftover).
 //
 // Cancelling ctx, or its deadline passing, abandons the connect: Connect
 // asks BlueZ to disconnect the device, waits for the link to be down, and
@@ -92,6 +94,53 @@ func (a *Adapter) Connect(ctx context.Context, mac string) (*Conn, error) {
 		return nil, retryableError(describe("connect "+mac, err))
 	}
 	return &Conn{adapter: a, object: object, closing: make(chan struct{})}, nil
+}
+
+// dropLeftover disconnects the controller if its link is up before this run
+// has made one, and returns once BlueZ reports the link down. A link that is
+// up then is not this run's: a killed go-pwr left it (BlueZ keeps it up for
+// as long as anyone has measured), or another client such as bluetoothctl
+// made it, and the controller may still hold bytes of an old reply to send on
+// it. A reading must never send its request on it, so it is dropped and the
+// reading connects afresh.
+//
+// The wait is bounded by ctx. A link that does not go down, because BlueZ
+// refuses or another client, such as the phone app, holds it or makes it
+// again, is an error that matches ErrRetryable: the reading fails rather than
+// read over a link it did not make. A device BlueZ has no object for is not
+// an error here; Connect reports it.
+func (a *Adapter) dropLeftover(ctx context.Context, mac string) error {
+	object := a.conn.Object("org.bluez", devicePath(a, mac))
+	up, err := connected(ctx, object)
+	if isGone(err) {
+		return nil
+	}
+	if err != nil {
+		return retryableError(describe("check for a link left up to "+mac, err))
+	}
+	if !up {
+		return nil
+	}
+	if err := object.CallWithContext(ctx, deviceInterface+".Disconnect", 0).Err; err != nil && !isGone(err) {
+		return retryableError(describe("drop the link left up to "+mac, err))
+	}
+	for {
+		up, err := connected(ctx, object)
+		if isGone(err) {
+			return nil
+		}
+		if err != nil {
+			return retryableError(describe("drop the link left up to "+mac, err))
+		}
+		if !up {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return retryableError(fmt.Errorf("drop the link left up to %s: still up when the time ran out: %w", mac, ctx.Err()))
+		case <-time.After(pollInterval):
+		}
+	}
 }
 
 // connect connects unless the link is already up.

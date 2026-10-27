@@ -360,7 +360,7 @@ func (l *statusLink) await(ctx context.Context, closing <-chan struct{}, comp *s
 		}
 		now := time.Now()
 		if err := comp.Check(now, cur.reply); err != nil {
-			return "", err
+			return "", l.noteDiscards(err)
 		}
 		timer := time.NewTimer(comp.Deadline().Sub(now))
 		select {
@@ -368,13 +368,23 @@ func (l *statusLink) await(ctx context.Context, closing <-chan struct{}, comp *s
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
-			return "", fmt.Errorf("%w: %w", ctx.Err(), comp.Check(comp.Deadline(), cur.reply))
+			return "", l.noteDiscards(fmt.Errorf("%w: %w", ctx.Err(), comp.Check(comp.Deadline(), cur.reply)))
 		case <-closing:
 			timer.Stop()
 			return "", fmt.Errorf("%w: the connection was closed", ErrNotConnected)
 		}
 		timer.Stop()
 	}
+}
+
+// noteDiscards says in err how many bytes of the read were discarded as the
+// tail of an earlier reply, if any: when a read gives up, that is part of
+// why. A read that succeeds says nothing, since the discard did no harm.
+func (l *statusLink) noteDiscards(err error) error {
+	if n := l.buf.discarded(); n > 0 {
+		return fmt.Errorf("%w (discarded %d bytes of an earlier reply's tail before it)", err, n)
+	}
+	return err
 }
 
 // drain waits for the reply of the last request, which did not complete, to

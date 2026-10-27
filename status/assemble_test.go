@@ -303,13 +303,13 @@ func TestAssembleRequiresFraming(t *testing.T) {
 	a := NewAssembler()
 	tok := a.Begin(0)
 	for i, c := range splitEvery(body, 20) {
-		_, whole, err := a.Add(tok, uint64(i+1), c)
-		if whole {
-			t.Fatal("an unframed body was reported whole")
+		reply, whole, err := a.Add(tok, uint64(i+1), c)
+		if whole || reply != "" || err != nil {
+			t.Fatalf("chunk %d of an unframed body: reply=%q whole=%v err=%v, want it discarded", i+1, reply, whole, err)
 		}
-		if i == 0 && !errors.Is(err, ErrNotFramed) {
-			t.Fatalf("unframed first chunk: err = %v, want ErrNotFramed", err)
-		}
+	}
+	if got := a.Discarded(); got != len(body) {
+		t.Errorf("Discarded = %d, want all %d bytes of the body", got, len(body))
 	}
 	// A leading space and no CRLF is cut off, however many bytes arrive.
 	a = NewAssembler()

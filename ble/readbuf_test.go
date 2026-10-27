@@ -219,3 +219,23 @@ func TestReadBufferHoldOverflowFailsRead(t *testing.T) {
 		t.Fatalf("read after overflow = %q (whole %v), want %q", reply, whole, want)
 	}
 }
+
+// TestReadBufferDiscardsStaleLead: a notification after the request's write
+// that is the tail of an earlier reply (a real chunk from another real
+// reply) is discarded and counted, and the real reply still assembles whole.
+func TestReadBufferDiscardsStaleLead(t *testing.T) {
+	chunks, want := realReply(t, 1)
+	stale := lolaChunks(t, 2)[4]
+	b, _ := dropCounter()
+	b.begin()
+	if _, _, err := b.bound(10); err != nil {
+		t.Fatal(err)
+	}
+	reply, whole := feed(t, b, 11, append([][]byte{stale}, chunks...))
+	if !whole || reply != want {
+		t.Errorf("whole=%v reply=%q, want the real reply alone", whole, reply)
+	}
+	if got := b.discarded(); got != len(stale) {
+		t.Errorf("discarded = %d, want %d", got, len(stale))
+	}
+}

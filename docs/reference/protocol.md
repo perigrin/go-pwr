@@ -181,9 +181,17 @@ Measured on the real replies, with the chunks exchanged and delivered in key ord
 
 The one that passes every warning check is **chunks 0 and 3**: the reply is whole, and the field that held 13.24 V reads `00000`. It is accepted silently and reports 0.00 V, which the rule in **Plausibility bounds** (a battery field of `00000` is accepted) records. It is the swap only in-order delivery prevents. Derived from the one capture.
 
-The same measurement on the 9 notifications of the real framed lola replies (all 21 give the same counts): 15 swaps do not pass whole, 8 because chunk 0 holds the leading space (`ErrNotFramed`, including 0↔3) and 7 because they move the CRLF chunk from the end (`ErrNotWhole`). The other 21 all decode, all trip the width check, and 10 also trip the °C/°F check. So no swap of a framed reply passes undetected, because chunk 0 anchors the framing, but that is a property of the framing rule, not of the reply's values. Every reversal, every rotation and every reordering of three consecutive chunks also either fails the read or carries a warning, in both forms.
+The same measurement on the 9 notifications of the real framed lola replies (all 21 give the same counts): 15 swaps do not pass whole, 8 because chunk 0 is not first: the chunks before it are discarded as the tail of an earlier reply (see **Stray notifications before a reply**), so the reply starts at chunk 0 and is missing them (`ErrNotWhole`, including 0↔3) and 7 because they move the CRLF chunk from the end (`ErrNotWhole`). The other 21 all decode, all trip the width check, and 10 also trip the °C/°F check. So no swap of a framed reply passes undetected, because chunk 0 anchors the framing, but that is a property of the framing rule, not of the reply's values. Every reversal, every rotation and every reordering of three consecutive chunks also either fails the read or carries a warning, in both forms.
 
 The checks are statistical and only warn. A real reply never trips either (22 of 22).
+
+### Stray notifications before a reply
+
+Measured on 2026-10-27 on lola (`TestSIGKILLNextReadingUnspliced`, `TestSIGKILLMidReplyThenPollReads`): a go-pwr killed with SIGKILL in the middle of a reading leaves the link up (see **Link after SIGKILL**) and may leave the tail of its reply in flight. The next run, on a new D-Bus connection, then received one 20-byte notification from the middle of the old reply (`19;00049;+18;+64;+18`) after its own request's write, where the sequence number of the write's reply could not tell it apart. Confidence: **observed**, once in six kills.
+
+So a read does not start its reply until a notification begins with a space (`0x20`). A space occurs only as the first byte of a reply: all 21 replies captured on lola have exactly one, at the start, and the afternoon body has none (`TestEveryCapturedReplyHasASpaceOnlyAtItsStart`). A notification that arrives before the reply has started and does not begin with a space is discarded and counted. Once a notification beginning with a space has started the reply, every later notification is part of it, as before. A reply whose first notification is lost is not rescued: none of the later ones begins with a space, so it is discarded whole and the read gives up on its timing as an empty reply.
+
+The discard is silent when the reading succeeds, because it did no harm and a warning would turn a good reading into one with a warning. When the reading fails, the error says how many bytes were discarded (`discarded 20 bytes of an earlier reply's tail before it`). A stale fragment that arrived in the same notification as the start of the new reply, or one that happens to begin with a space, is not recognised; neither was seen.
 
 ## Notification sizes and timing on lola
 

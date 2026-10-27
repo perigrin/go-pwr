@@ -5,6 +5,7 @@ package status
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 )
@@ -24,7 +25,8 @@ var (
 	// ErrStaleToken: a notification was added under an earlier read's
 	// token. It is dropped, and the current read is unaffected.
 	ErrStaleToken = errors.New("notification belongs to an earlier read")
-	// ErrNotFramed: the reply does not start with a space.
+	// ErrNotFramed: the reply does not start with a space. A read discards
+	// leading notifications that don't, so Add no longer returns it.
 	ErrNotFramed = errors.New("reply does not start with a space")
 	// ErrTrailingBytes: bytes arrived after the reply's CRLF.
 	ErrTrailingBytes = errors.New("bytes after the reply's CRLF")
@@ -52,7 +54,10 @@ type Assembler struct {
 	boundary uint64 // keys at or below it predate this read's request
 	last     uint64 // key of the latest notification added
 	err      error  // set once the read has failed; the read is then closed
-	done     bool
+	// discarded counts the bytes of leading notifications thrown away
+	// because the reply had not started (see Add).
+	discarded int
+	done      bool
 }
 
 // NewAssembler returns an Assembler with no read begun.
@@ -72,6 +77,7 @@ func (a *Assembler) Begin(boundary uint64) Token {
 	a.boundary = boundary
 	a.last = boundary
 	a.err = nil
+	a.discarded = 0
 	a.done = false
 	return a.tok
 }
@@ -104,6 +110,19 @@ func (a *Assembler) Add(tok Token, key uint64, chunk []byte) (string, bool, erro
 		return a.fail(ErrKeyOrder)
 	}
 	a.last = key
+	// A reply starts with a space, and a space occurs nowhere else in it: all
+	// 21 replies captured on lola have exactly one, as their first byte, and
+	// so does no byte of the afternoon capture's body (TestEveryCapturedReply
+	// HasASpaceOnlyAtItsStart). So until the reply has started, a notification
+	// that does not begin with a space cannot be the start of this read's
+	// reply. It is the tail of an earlier reply, such as one a killed run's
+	// request left in the controller, and is discarded and counted. A reply
+	// whose first notification is lost is not rescued by this: none of its
+	// later ones begins with a space either, so it never completes.
+	if a.buf.Len() == 0 && len(chunk) > 0 && chunk[0] != ' ' {
+		a.discarded += len(chunk)
+		return "", false, nil
+	}
 	a.buf.Write(chunk)
 	reply := a.buf.String()
 	if reply != "" && reply[0] != ' ' {
@@ -135,6 +154,17 @@ func wholeBody(body string) bool {
 // fail closes the read with err, carrying the bytes received so far.
 func (a *Assembler) fail(err error) (string, bool, error) {
 	reply := a.buf.String()
+	if a.discarded > 0 {
+		err = fmt.Errorf("%w (discarded %d bytes of an earlier reply's tail before it)", err, a.discarded)
+	}
 	a.err = &ReplyError{Reply: reply, Err: err}
 	return reply, false, a.err
+}
+
+// Discarded is how many bytes of the current read were discarded as the tail
+// of an earlier reply.
+func (a *Assembler) Discarded() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.discarded
 }

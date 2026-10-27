@@ -37,7 +37,16 @@ func sigkillIfRunning(t *testing.T, r *liveRun) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := r.finish(45 * time.Second); got.status != -1 {
+	// A process that has exited but not yet been reaped still takes the
+	// signal without error, and then finishes with its own status 0: that is
+	// the same kill that did not happen.
+	switch got := r.finish(45 * time.Second); got.status {
+	case -1:
+		return true
+	case 0:
+		t.Log("go-pwr exited by itself just before the SIGKILL")
+		return false
+	default:
 		t.Fatalf("status %d after SIGKILL, want -1 (killed by a signal)", got.status)
 	}
 	return true

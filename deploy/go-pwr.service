@@ -2,6 +2,8 @@
 # ABOUTME: controller and appending JSON readings to /var/log/go-pwr/readings.jsonl.
 #
 # Install on lola:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin go-pwr
+#   sudo install -d -o go-pwr -g go-pwr -m 0755 /var/log/go-pwr
 #   sudo install -m 0755 go-pwr /usr/local/bin/go-pwr
 #   sudo install -m 0644 deploy/go-pwr.service /etc/systemd/system/go-pwr.service
 #   sudo systemctl daemon-reload && sudo systemctl enable --now go-pwr
@@ -25,8 +27,10 @@ StandardError=journal
 Restart=always
 RestartSec=5
 # BlueZ's D-Bus policy lets any user talk to org.bluez, so no privilege is needed.
-DynamicUser=yes
-LogsDirectory=go-pwr
+# /var/log/go-pwr is made at install time, not with LogsDirectory=: systemd opens
+# the append: file before it creates LogsDirectory, so the first start would fail.
+User=go-pwr
+Group=go-pwr
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

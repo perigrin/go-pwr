@@ -178,6 +178,7 @@ type write struct {
 	line      int
 	conn      uint16
 	opcode    byte
+	link      int // index in Report.Links of the connection it went out on
 	hasHandle bool
 	handle    uint16
 	data      []byte

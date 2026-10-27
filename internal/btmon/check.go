@@ -36,12 +36,24 @@ type Write struct {
 	Opcode byte
 	Handle uint16
 	Data   []byte
+	Link   int // index in Report.Links of the link the write went out on
+}
+
+// Link is one connection to the controller, from the LE Connection Complete
+// that opened it to the Disconnect Complete that closed it. Handles are
+// reused (every connection in the lola capture is 64), so a link is told
+// from another by its place in the trace, not by its handle.
+type Link struct {
+	Handle uint16
+	Up     int // line of the LE Connection Complete
+	Down   int // line of the Disconnect Complete, 0 if the trace ends first
 }
 
 // Report is what Check found in a trace.
 type Report struct {
 	Connections    int // connections to the controller
 	Map            HandleMap
+	Links          []Link  // each of those connections, in the order they came up
 	Writes         []Write // every write on those connections
 	StatusRequests int     // writes of 0x20 to FFF2
 	// WritesSeen counts the ATT PDUs the host sent on any connection that are
@@ -84,6 +96,7 @@ func Check(trace io.Reader, mac string) (*Report, error) {
 	var disc discovery
 	var problems []error
 	connected := map[connKey]bool{} // connections now open, and whether to the controller
+	open := map[connKey]int{}       // index in report.Links of each open connection to the controller
 	var writes []write
 	for _, p := range packets {
 		if ev, ok := connectionEventOf(p); ok {
@@ -92,8 +105,14 @@ func Check(trace io.Reader, mac string) (*Report, error) {
 				connected[key] = ev.address == mac
 				if ev.address == mac {
 					report.Connections++
+					open[key] = len(report.Links)
+					report.Links = append(report.Links, Link{Handle: ev.handle, Up: p.line})
 				}
 			} else {
+				if i, ok := open[key]; ok {
+					report.Links[i].Down = p.line
+					delete(open, key)
+				}
 				delete(connected, key)
 			}
 			continue
@@ -116,14 +135,16 @@ func Check(trace io.Reader, mac string) (*Report, error) {
 		case pdu.tx && pdu.unparsed:
 			problems = append(problems, fmt.Errorf("line %d: ATT PDU with no opcode, which go-pwr never sends", pdu.line))
 		case pdu.tx && isWrite(pdu.opcode):
-			writes = append(writes, writeOf(pdu))
+			w := writeOf(pdu)
+			w.link = open[connKey{p.adapter, pdu.conn}]
+			writes = append(writes, w)
 		case pdu.tx && !isKnownNonWrite(pdu.opcode):
 			problems = append(problems, fmt.Errorf("line %d: ATT opcode %#02x is not one the checker knows to be a non-write, so it might be a write", pdu.line, pdu.opcode))
 		}
 	}
 
 	for _, w := range writes {
-		report.Writes = append(report.Writes, Write{Line: w.line, Conn: w.conn, Opcode: w.opcode, Handle: w.handle, Data: w.data})
+		report.Writes = append(report.Writes, Write{Line: w.line, Conn: w.conn, Opcode: w.opcode, Handle: w.handle, Data: w.data, Link: w.link})
 	}
 	if report.Connections == 0 {
 		return report, fmt.Errorf("%w: %s", ErrNoConnection, mac)
@@ -142,6 +163,29 @@ func Check(trace io.Reader, mac string) (*Report, error) {
 		}
 	}
 	return report, errors.Join(problems...)
+}
+
+// FirstRequestOnNewLink says why the first status request in the report did
+// not go out on a link that came up after every earlier link had gone down,
+// or nil if it did: a run that found a link up before it started must have
+// dropped it and made its own before it wrote.
+func (r *Report) FirstRequestOnNewLink() error {
+	for _, w := range r.Writes {
+		if w.Handle != r.Map.FFF2Value || r.Map.FFF2Value == 0 {
+			continue
+		}
+		if w.Link == 0 {
+			return fmt.Errorf("line %d: the first status request is on the first link in the trace, with no earlier link to have dropped", w.Line)
+		}
+		link := r.Links[w.Link]
+		for i, earlier := range r.Links[:w.Link] {
+			if earlier.Down == 0 || earlier.Down > link.Up {
+				return fmt.Errorf("line %d: the first status request is on the link that came up at line %d, while the link of line %d (link %d) was still up", w.Line, link.Up, earlier.Up, i)
+			}
+		}
+		return nil
+	}
+	return errors.New("no status request in the trace")
 }
 
 // service is a primary service from a Read By Group Type Response; uuid is

@@ -80,6 +80,26 @@
 // error. Close does the same, waiting up to 5 s for BlueZ to report the link
 // down.
 //
+// A reading never sends its request on a link it did not make. A link that
+// is up before a reading connects was left by a run that was killed, which
+// BlueZ keeps up, or made by another client such as bluetoothctl, and the
+// controller may still have an old reply to send on it, which the next
+// reading could take for its own. So ConnectWithRetry, which every reading
+// connects through, first asks BlueZ to disconnect the controller if its link
+// is up, waits until the Connected property is false (within ctx, so inside
+// the reading's --timeout) and then connects afresh. If the link will not go
+// down within the time, because BlueZ refuses to drop it or another client
+// holds it, the reading fails with an error that matches ErrRetryable. A link
+// that another client makes again between the drop and the connect is not
+// noticed, and Connect reuses it (see docs/reference/protocol.md, "Link after
+// SIGKILL"). Connect alone reuses a link that is up and is left to callers
+// that want that. A second go-pwr on the same machine therefore disconnects
+// the owner's link mid-reading rather than sharing it: decision 0001's
+// one-owner rule applies. A Follower
+// keeps the link it made itself across readings, and drops only a link that
+// was up before its first connect, or one it did not make after a failed
+// reading.
+//
 // Service discovery is not watched. The library's DiscoverServices polls
 // ServicesResolved every 10 ms for at most 10 s and can't be cancelled, but
 // BlueZ resolves the services during the connect, so on lola the poll ends
@@ -124,17 +144,21 @@
 // notification subscription of its own. Notifications of the old reply go to
 // the old D-Bus connection, and the new one bounds its read at the write's
 // reply sequence number, so a late notification cannot be taken for the new
-// reply. That holds even when BlueZ would not drop the old link and Connect
-// reuses it, which is why the guarantee rests on the new D-Bus connection and
-// not on the link being new. A Follower does not drain the old reply up to
-// the D-Bus sequence boundary instead, because reconnecting is simpler and
-// stronger, and costs one scan and connect per failed reading.
+// reply. That holds even if the old link were still up, which is why the
+// guarantee rests on the new D-Bus connection and not on the link being new.
+// A reconnect drops such a link first (see "Connecting"), so it is a new link
+// unless the drop fails, and then the reading fails. A Follower does not
+// drain the old reply up to the D-Bus sequence boundary instead, because
+// reconnecting is simpler and stronger, and costs one scan and connect per
+// failed reading.
 //
 // A reply left behind by a run that was killed outright is another way for a
 // tail to arrive after a request's write. A read throws away the bytes
 // that arrive before its reply has started, up to the space that starts
 // every reply (see status.Assembler), and says how many bytes that was only
-// if the read then fails.
+// if the read then fails. That discard cannot tell a whole stale reply from
+// the current one; what keeps one out is that the reading's link is its own
+// (see "Connecting").
 //
 // Close ends a Follower: a Read after it returns ErrNotConnected and makes no
 // connection. Close can't interrupt a Read in flight; it waits for it, so

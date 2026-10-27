@@ -60,7 +60,9 @@ func devicePath(a *Adapter, mac string) dbus.ObjectPath {
 
 // Connect opens a link to the controller at mac, which the caller found with
 // Scan first, because BlueZ connects only to a device it already has an
-// object for. A link that an earlier run left up is reused.
+// object for. A link that is already up is reused, which Connect leaves to
+// its caller to rule out: a reading goes through ConnectWithRetry, which
+// drops such a link first (see dropLeftover).
 //
 // Cancelling ctx, or its deadline passing, abandons the connect: Connect
 // asks BlueZ to disconnect the device, waits for the link to be down, and
@@ -92,6 +94,38 @@ func (a *Adapter) Connect(ctx context.Context, mac string) (*Conn, error) {
 		return nil, retryableError(describe("connect "+mac, err))
 	}
 	return &Conn{adapter: a, object: object, closing: make(chan struct{})}, nil
+}
+
+// dropLeftover disconnects the controller if its link is up before this run
+// has made one, and returns once BlueZ reports the link down. A link that is
+// up then is not this run's: a killed go-pwr left it (BlueZ keeps it up for
+// as long as anyone has measured), or another client such as bluetoothctl
+// made it, and the controller may still hold bytes of an old reply to send on
+// it. A reading must never send its request on it, so it is dropped and the
+// reading connects afresh.
+//
+// The wait is bounded by ctx. A link that does not go down, because BlueZ
+// refuses or the time runs out, is an error that matches ErrRetryable: the
+// reading fails rather than read over a link it did not make. A link that
+// another client makes again after the drop is not noticed: Connect finds it
+// up and reuses it, a window that protocol.md records. A device BlueZ has no
+// object for is not an error here; Connect reports it.
+func (a *Adapter) dropLeftover(ctx context.Context, mac string) error {
+	object := a.conn.Object("org.bluez", devicePath(a, mac))
+	up, err := connected(ctx, object)
+	if isGone(err) {
+		return nil
+	}
+	if err != nil {
+		return retryableError(describe("check for a link left up to "+mac, err))
+	}
+	if !up {
+		return nil
+	}
+	if err := disconnectWithin(ctx, object); err != nil {
+		return retryableError(describe("drop the link left up to "+mac, err))
+	}
+	return nil
 }
 
 // connect connects unless the link is already up.
@@ -167,6 +201,20 @@ func (c *Conn) Close() error {
 func disconnect(object dbus.BusObject) error {
 	ctx, cancel := context.WithTimeout(context.Background(), closeBound)
 	defer cancel()
+	if err := disconnectWithin(ctx, object); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("link still up after %v", closeBound)
+		}
+		return err
+	}
+	return nil
+}
+
+// disconnectWithin asks BlueZ to disconnect the device and waits until ctx
+// ends for it to report the link down. A device that is not connected, or
+// that BlueZ no longer knows, counts as down. When ctx ends first, the error
+// wraps ctx's.
+func disconnectWithin(ctx context.Context, object dbus.BusObject) error {
 	if err := object.CallWithContext(ctx, deviceInterface+".Disconnect", 0).Err; err != nil && !isGone(err) {
 		return err
 	}
@@ -180,7 +228,7 @@ func disconnect(object dbus.BusObject) error {
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("link still up after %v", closeBound)
+			return fmt.Errorf("link still up when the time ran out: %w", ctx.Err())
 		case <-time.After(pollInterval):
 		}
 	}

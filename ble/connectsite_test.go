@@ -21,7 +21,10 @@ import (
 //   - Follower.establish calls connectWithRetry, which takes the hook that
 //     configures the Conn;
 //   - connectWithRetry configures each Conn before it calls ready, since ready
-//     opens the status link, which copies the hooks when it is opened.
+//     opens the status link, which copies the hooks when it is opened;
+//   - connectWithRetry calls dropLeftover before it calls Connect, since
+//     Connect reuses a link that is up, and a reading must never send its
+//     request on a link it did not make.
 //
 // It fails closed: a file that does not parse, or a dir with no non-test Go
 // files, is an error. Build constraints are ignored. Blind spots: a call
@@ -35,7 +38,7 @@ func checkConnectSites(dir string) ([]string, error) {
 	var breaches []string
 	var files int
 	establishRetries := false
-	var configureAt, readyAt token.Pos
+	var configureAt, readyAt, dropAt, connectAt token.Pos
 	for _, path := range paths {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -66,6 +69,12 @@ func checkConnectSites(dir string) ([]string, error) {
 				case "Connect":
 					if fn.Name.Name != "connectWithRetry" {
 						breaches = append(breaches, fmt.Sprintf("%s: %s calls Connect; only connectWithRetry may", fset.Position(call.Pos()), fn.Name.Name))
+					} else {
+						connectAt = call.Pos()
+					}
+				case "dropLeftover":
+					if fn.Name.Name == "connectWithRetry" {
+						dropAt = call.Pos()
 					}
 				case "connectWithRetry":
 					if fn.Name.Name == "establish" {
@@ -88,6 +97,9 @@ func checkConnectSites(dir string) ([]string, error) {
 	}
 	if !configureAt.IsValid() || !readyAt.IsValid() || configureAt > readyAt {
 		breaches = append(breaches, "connectWithRetry does not call configure before ready")
+	}
+	if !dropAt.IsValid() || !connectAt.IsValid() || dropAt > connectAt {
+		breaches = append(breaches, "connectWithRetry does not call dropLeftover before Connect")
 	}
 	return breaches, nil
 }

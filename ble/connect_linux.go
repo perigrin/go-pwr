@@ -204,27 +204,48 @@ func ignoreGone(err error) error {
 	return err
 }
 
-// isLinkLost reports whether err says BlueZ found the device not connected,
-// as it does when a link found up goes down while the status link is being
-// opened.
-func isLinkLost(err error) bool {
-	return dbusErrorName(err) == "org.bluez.Error.NotConnected"
+// linkLost turns an error from opening the status link into the error of a
+// lost link, closed with closeLink, or returns nil if the link is not lost. A
+// link is lost when up says it is down, whichever step of opening gave the
+// error, so every loss is told the same way and not by the name of one error.
+// An error with the link still up, or one with no answer on the link, is not
+// a loss: it is left for the request, which opens the link again and reports
+// it. A lost link is closed first, so the next attempt meets a link that is
+// down and makes a new one; the error is retryable, and joined with the
+// close's own error if that failed.
+func linkLost(mac string, openErr error, up func() (bool, error), closeLink func() error) error {
+	if openErr == nil {
+		return nil
+	}
+	if isUp, err := up(); err != nil || isUp {
+		return nil
+	}
+	err := fmt.Errorf("connect %s: the link was lost while opening it: %w", mac, openErr)
+	if closeErr := closeLink(); closeErr != nil {
+		err = errors.Join(err, fmt.Errorf("close the lost link: %w", closeErr))
+	}
+	return retryableError(err)
 }
 
 // ready opens the status link of a Conn that Connect returned, so a link
 // that an earlier run left behind and that is going down is found here, where
 // ConnectWithRetry can connect again, and not in the request. Only the loss
-// of the link is reported from here: any other error from opening the status
-// link is left for RequestStatus, which opens it again and reports it as it
-// always has. A lost link is closed first, so the next attempt meets a link
-// that is down and makes a new one.
+// of the link is reported from here, whichever step of opening found it (see
+// linkLost): any other error from opening the status link is left for
+// RequestStatus, which opens it again and reports it as it always has.
 func (c *Conn) ready(ctx context.Context, mac string) (*Conn, error) {
-	if err := c.openStatusLink(ctx); isLinkLost(err) {
-		err = fmt.Errorf("connect %s: the link was lost while opening it: %w", mac, err)
-		if closeErr := c.Close(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("close the lost link: %w", closeErr))
+	up := func() (bool, error) {
+		// The check runs after ctx may be done, so it has a bound of its own.
+		checkCtx, cancel := context.WithTimeout(context.Background(), linkCheckBound)
+		defer cancel()
+		up, err := connected(checkCtx, c.object)
+		if isGone(err) {
+			return false, nil
 		}
-		return nil, retryableError(err)
+		return up, err
+	}
+	if err := linkLost(mac, c.openStatusLink(ctx), up, c.Close); err != nil {
+		return nil, err
 	}
 	return c, nil
 }

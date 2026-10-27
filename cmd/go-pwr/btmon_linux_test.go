@@ -311,6 +311,7 @@ func wantNoBadWrites(t *testing.T, report *btmon.Report, err error) {
 // other devices' advertisements print Data[] lines too.
 var (
 	cccdOnMarker = regexp.MustCompile(`ATT: Write Request \(0x12\) len 4\n(?:[ \t]+(?:Handle|Value Handle):[^\n]*\n)+[ \t]+Data\[2\]: 0100\n`)
+	linkUpMarker = regexp.MustCompile(`LE Connection Complete \(0x01\)\n(?:[ \t]+[^\n]*\n)*?[ \t]+Status: Success`)
 	statusMarker = regexp.MustCompile(`ATT: Write Request \(0x12\) len 3\n(?:[ \t]+(?:Handle|Value Handle):[^\n]*\n)+[ \t]+Data\[1\]: 20\n`)
 )
 
@@ -351,17 +352,17 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 	// closed after the reply, outside the budget (decision 0001, "--timeout";
 	// closeBound in ble/ble.go): a reading that printed 4 s in can exit 8 s
 	// in. So whether a given timeout ends the reading before or after the
-	// connect varies from run to run, and the test searches for it. A warm
-	// reading, which also puts discovery in the trace, gives the time to its
-	// reply; timeouts from 95% of that down to 45% in steps are tried, at most
-	// six, until two readings are cut off after the connect, which their
-	// error says by naming the status request ("status request:" also
-	// prefixes a failure to open the link, so the trace's second connection
-	// is the check that a connect really happened). 1 s ends in the scan and
-	// writes nothing. At least one reading must be cut off after the connect.
+	// link comes up varies from run to run, and the test searches for it. A
+	// warm reading, which also puts discovery in the trace, gives the time to
+	// its reply; timeouts from 95% of that down to 45% in steps are tried, at
+	// most six, until two readings have failed with the link up. That is
+	// judged from btmon's own text (an LE Connection Complete during the run),
+	// not from the error, which names the connect even when the link was up.
+	// 1 s ends in the scan and writes nothing. At least one reading must be
+	// cut off with the link up.
 	t.Run("timeout too short", func(t *testing.T) {
-		cutOffAfterConnect := 0
-		report, err := capturedRun(t, mac, func(*btmonCapture) {
+		cutOffLinkUp := 0
+		report, err := capturedRun(t, mac, func(c *btmonCapture) {
 			t.Log(oneShotWarmup)
 			warm := startGoPwr(t, "--mac", mac, "--format", "json")
 			if !warm.waitFor(60*time.Second, func() bool { return warm.readings() >= 1 }) {
@@ -375,27 +376,31 @@ func TestBtmonWritesOnlyStatusRequestOnFailures(t *testing.T) {
 
 			runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", "1s")
 			for _, fraction := range []float64{0.95, 0.85, 0.75, 0.65, 0.55, 0.45} {
+				c.settle()
+				from := c.size()
 				timeout := (time.Duration(float64(replyAt)*fraction) / (100 * time.Millisecond)) * (100 * time.Millisecond)
 				r, _ := runGoPwr(t, "--mac", mac, "--format", "json", "--timeout", timeout.String())
-				if r.status == 1 && strings.Contains(r.stderr, "status request:") {
-					cutOffAfterConnect++
+				c.settle()
+				if r.status == 1 && linkUpMarker.MatchString(c.since(from)) {
+					cutOffLinkUp++
 				}
-				if cutOffAfterConnect >= 2 {
+				if cutOffLinkUp >= 2 {
 					break
 				}
 			}
 		})
 		wantNoBadWrites(t, report, err)
-		if cutOffAfterConnect == 0 || report.Connections < 2 {
-			t.Errorf("%d readings were cut off after the connect and the trace has %d connections: no timeout landed after the connect, so none proves anything", cutOffAfterConnect, report.Connections)
+		if cutOffLinkUp == 0 {
+			t.Errorf("no reading failed with the link up (the trace has %d connections): no timeout landed after the link came up, so none proves anything", report.Connections)
 		}
 	})
 
-	// With the GATT cache just cleared a reading takes about 12 s, so 6 s
-	// lands after the connect and in the discovery.
+	// With the GATT cache just cleared, the link comes up and discovery
+	// follows, which takes seconds: a SIGINT the moment btmon prints the
+	// connection lands in the discovery, whatever the scan took.
 	t.Run("SIGINT mid-discovery", func(t *testing.T) {
-		report, err := capturedRun(t, mac, func(*btmonCapture) {
-			interrupt(t, syscall.SIGINT, 6*time.Second, "--mac", mac, "--format", "json")
+		report, err := capturedRun(t, mac, func(c *btmonCapture) {
+			cancelAfter(t, c, mac, "connection", linkUpMarker)
 		})
 		wantNoBadWrites(t, report, err)
 		if report.Connections < 1 {

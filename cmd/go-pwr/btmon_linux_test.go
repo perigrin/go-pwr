@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -142,13 +143,25 @@ func startBtmon(t *testing.T) *btmonCapture {
 }
 
 // count says how many times marker has appeared in what btmon has printed.
-func (c *btmonCapture) count(marker string) int {
-	return strings.Count(c.out.String(), marker)
+func (c *btmonCapture) count(marker *regexp.Regexp) int {
+	return len(marker.FindAllStringIndex(c.out.String(), -1))
+}
+
+// settle waits until btmon has printed nothing for 2 s, so that the lines of
+// an earlier run are all counted before the next marker is waited for.
+func (c *btmonCapture) settle() {
+	last, quietSince := len(c.out.String()), time.Now()
+	for time.Since(quietSince) < 2*time.Second {
+		time.Sleep(50 * time.Millisecond)
+		if n := len(c.out.String()); n != last {
+			last, quietSince = n, time.Now()
+		}
+	}
 }
 
 // waitForMore waits up to limit for marker to appear more often than it has
 // before, polling fast so that a signal can follow within a few ms.
-func (c *btmonCapture) waitForMore(marker string, before int, limit time.Duration) bool {
+func (c *btmonCapture) waitForMore(marker *regexp.Regexp, before int, limit time.Duration) bool {
 	for deadline := time.Now().Add(limit); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
 		if c.count(marker) > before {
 			return true
@@ -271,22 +284,27 @@ func wantNoBadWrites(t *testing.T, report *btmon.Report, err error) {
 }
 
 // What btmon prints for the writes go-pwr makes: the CCCD set to notifications
-// on, and the status request. A notification's Data[20] does not match.
+// on, and the status request. They are matched whole, ATT line to data, since
+// other devices' advertisements print Data[] lines too.
+var (
+	cccdOnMarker = regexp.MustCompile(`ATT: Write Request \(0x12\) len 4\n(?:[ \t]+(?:Handle|Value Handle):[^\n]*\n)+[ \t]+Data\[2\]: 0100\n`)
+	statusMarker = regexp.MustCompile(`ATT: Write Request \(0x12\) len 3\n(?:[ \t]+(?:Handle|Value Handle):[^\n]*\n)+[ \t]+Data\[1\]: 20\n`)
+)
+
 const (
-	cccdOnMarker  = "Data[2]: 0100"
-	statusMarker  = "Data[1]: 20\n"
 	oneShotWarmup = "a full reading first, so the trace holds discovery and the reading after it is not a cold one"
 )
 
 // cancelAfter starts go-pwr, signals it with SIGINT as soon as btmon prints
 // one more of marker, and checks that it exits. The signal can overtake the
 // reply or follow it; either way go-pwr must stop.
-func cancelAfter(t *testing.T, c *btmonCapture, mac, marker string) {
+func cancelAfter(t *testing.T, c *btmonCapture, mac string, marker *regexp.Regexp) {
 	t.Helper()
+	c.settle()
 	before := c.count(marker)
 	r := startGoPwr(t, "--mac", mac, "--format", "json")
 	if !c.waitForMore(marker, before, 60*time.Second) {
-		t.Fatalf("btmon showed no %q within 60 s of starting go-pwr; stderr %q", marker, r.stderr)
+		t.Fatalf("btmon showed no %v within 60 s of starting go-pwr; stderr %q", marker, r.stderr)
 	}
 	r.cmd.Process.Signal(syscall.SIGINT)
 	got := r.finish(45 * time.Second)

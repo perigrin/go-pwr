@@ -95,3 +95,23 @@ func TestAssembleFailureAfterDiscardSaysSo(t *testing.T) {
 		t.Errorf("error %q does not say 20 bytes were discarded", err)
 	}
 }
+
+// A stale tail that ends inside a notification shifts the real reply off the
+// controller's usual 20-byte cuts: the notification that carries the reply's
+// first byte also carries the tail's last bytes, so it does not begin with a
+// space. Seen on lola after a SIGKILL: 198 bytes, a 29-byte tail and a whole
+// reply, and no reply accepted. The stream is the last 29 bytes of one real
+// reply followed by another real reply, cut every 20 bytes.
+func TestAssembleStaleTailEndingMidNotification(t *testing.T) {
+	old := lolaReply(t, 2)
+	tail := old[len(old)-29:]
+	stream := tail + lolaReply(t, 1)
+	a := NewAssembler()
+	reply, whole := addAll(t, a, a.Begin(0), 1, splitEvery(stream, 20))
+	if !whole || reply != lolaReply(t, 1) {
+		t.Errorf("whole=%v reply=%q, want the real reply alone", whole, reply)
+	}
+	if got := a.Discarded(); got != 29 {
+		t.Errorf("Discarded = %d, want 29", got)
+	}
+}

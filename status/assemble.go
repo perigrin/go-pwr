@@ -4,6 +4,7 @@
 package status
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -113,15 +114,22 @@ func (a *Assembler) Add(tok Token, key uint64, chunk []byte) (string, bool, erro
 	// A reply starts with a space, and a space occurs nowhere else in it: all
 	// 21 replies captured on lola have exactly one, as their first byte, and
 	// so does no byte of the afternoon capture's body (TestEveryCapturedReply
-	// HasASpaceOnlyAtItsStart). So until the reply has started, a notification
-	// that does not begin with a space cannot be the start of this read's
-	// reply. It is the tail of an earlier reply, such as one a killed run's
-	// request left in the controller, and is discarded and counted. A reply
-	// whose first notification is lost is not rescued by this: none of its
-	// later ones begins with a space either, so it never completes.
-	if a.buf.Len() == 0 && len(chunk) > 0 && chunk[0] != ' ' {
-		a.discarded += len(chunk)
-		return "", false, nil
+	// HasASpaceOnlyAtItsStart). So until the reply has started, the bytes
+	// before the first space cannot be part of this read's reply. They are
+	// the tail of an earlier reply, such as one a killed run's request left
+	// in the controller, and are discarded and counted. The cut is at the
+	// space and not at the notification: a tail that ends inside a
+	// notification leaves that notification beginning with the tail and
+	// carrying the reply's first bytes after it. A reply whose first
+	// notification is lost is not rescued by this: none of its later ones has
+	// a space either, so it never completes.
+	if a.buf.Len() == 0 {
+		start := bytes.IndexByte(chunk, ' ')
+		if start < 0 {
+			start = len(chunk)
+		}
+		a.discarded += start
+		chunk = chunk[start:]
 	}
 	a.buf.Write(chunk)
 	reply := a.buf.String()
